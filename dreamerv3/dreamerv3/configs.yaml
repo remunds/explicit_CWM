@@ -198,6 +198,14 @@ atari:
   enc.spaces: 'image'
   dec.spaces: 'image'
 
+oc_atari:
+  task: ALE/Breakout-v5
+  (enc|dec).simple.minres: 6
+  run:
+    steps: 5.1e7
+  enc.spaces: 'ns_repr'
+  dec.spaces: 'ns_repr'
+
 procgen:
   task: procgen_coinrun
   env.procgen.size: [96, 96]
