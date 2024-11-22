@@ -1,0 +1,8 @@
+chex
+einops
+jax[cuda12_pip]
+jaxlib
+optax
+tensorflow_probability
+pillow
+rtpt
