@@ -6,3 +6,4 @@ optax
 tensorflow_probability
 pillow
 rtpt
+gymnasium[atari, accept-rom-license]==0.29

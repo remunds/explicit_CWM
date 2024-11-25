@@ -219,6 +219,31 @@ class RSSM(nj.Module):
   def _dist(self, logit):
     return tfd.Independent(jaxutils.OneHotDist(logit.astype(f32)), 1)
 
+class DummyEncoder(nj.Module):
+  def __init__(self, spaces, **kw):
+    self.spaces = spaces
+    self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
+    self.imgkeys = [k for k, s in spaces.items() if len(s.shape) == 3]
+    self.vecinp = Input(self.veckeys, featdims=1)
+    self.imginp = Input(self.imgkeys, featdims=3)
+    self.kw = kw
+    self.obs_shape = spaces['nsrepr'].shape[0] * spaces['nsrepr'].shape[1]
+  
+  def __call__(self, data, bdims=2):
+    print("encoder input: ", data)
+    return data['nsrepr'].reshape((-1, self.obs_shape)) 
+  
+class DummyDecoder(nj.Module):
+  def __init__(self, spaces, **kw):
+    self.spaces = spaces
+    self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
+    self.imgkeys = [k for k, s in spaces.items() if len(s.shape) == 3]
+    self.kw = kw
+  
+  def __call__(self, lat, bdims=2):
+    print("decoder input: ", lat)
+    return {"nsrepr": lat.reshape((-1, *lat.shape[bdims:]))}
+
 
 class SimpleEncoder(nj.Module):
 
@@ -365,7 +390,6 @@ class SimpleDecoder(nj.Module):
       split = np.cumsum([self.spaces[k].shape[-1] for k in self.imgkeys][:-1])
       for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
         outs[k] = jaxutils.MSEDist(f32(out), 3, 'sum')
-
     return outs
 
 

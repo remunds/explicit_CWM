@@ -199,12 +199,14 @@ atari:
   dec.spaces: 'image'
 
 oc_atari:
-  task: ALE/Breakout-v5
-  (enc|dec).simple.minres: 6
+  task: ALE/Pong-v5
+  # env.atari.size: [48, 48]
+  (enc|dec).simple.minres: 3
+  # (enc|dec).simple.minres: 2
   run:
     steps: 5.1e7
-  enc.spaces: 'ns_repr'
-  dec.spaces: 'ns_repr'
+  enc.spaces: 'nsrepr'
+  dec.spaces: 'nsrepr'
 
 procgen:
   task: procgen_coinrun

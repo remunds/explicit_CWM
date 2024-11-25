@@ -51,6 +51,11 @@ class Agent(nj.Module):
     self.dec = {
         'simple': bind(nets.SimpleDecoder, **config.dec.simple),
     }[config.dec.typ](dec_space, name='dec')
+    # self.enc = {'simple': bind(nets.DummyEncoder, **config.enc.simple),
+    # }[config.enc.typ](enc_space, name='enc')
+    # self.dec = {'simple': bind(nets.DummyDecoder, **config.dec.simple),
+    # }[config.dec.typ](dec_space, name='dec')
+
     self.dyn = {
         'rssm': bind(nets.RSSM, **config.dyn.rssm),
     }[config.dyn.typ](name='dyn')
