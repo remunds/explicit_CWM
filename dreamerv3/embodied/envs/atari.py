@@ -72,7 +72,6 @@ class Atari(embodied.Env):
 
   @property
   def obs_space(self):
-    import ipdb; ipdb.set_trace()
     return {
         'image': embodied.Space(np.uint8, (*self.size, 1 if self.gray else 3)),
         'reward': embodied.Space(np.float32),

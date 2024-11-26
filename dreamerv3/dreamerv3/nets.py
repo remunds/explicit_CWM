@@ -230,19 +230,29 @@ class DummyEncoder(nj.Module):
     self.obs_shape = spaces['nsrepr'].shape[0] * spaces['nsrepr'].shape[1]
   
   def __call__(self, data, bdims=2):
-    print("encoder input: ", data)
-    return data['nsrepr'].reshape((-1, self.obs_shape)) 
+    # shape: (4,11,2,6)
+    # reshape to: (4,11,12)
+    data_shape = data['nsrepr'].shape
+    return data['nsrepr'].reshape((*data_shape[0:2], -1))
   
 class DummyDecoder(nj.Module):
+  # inputs: tuple = ('deter', 'stoch')
   def __init__(self, spaces, **kw):
     self.spaces = spaces
     self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
     self.imgkeys = [k for k, s in spaces.items() if len(s.shape) == 3]
-    self.kw = kw
+    self.keys = [k for k, s in spaces.items()]
+    # self.kw = kw
+    # self.inp = Input(self.inputs, featdims=1)
   
   def __call__(self, lat, bdims=2):
-    print("decoder input: ", lat)
-    return {"nsrepr": lat.reshape((-1, *lat.shape[bdims:]))}
+    # inp = self.inp(lat, bdims, jaxutils.COMPUTE_DTYPE)
+    # return {"nsrepr": lat.reshape((-1, *lat.shape[bdims:]))}
+    outs = {}
+    for k in self.keys: 
+      outs[k] = jaxutils.Always1Dist(lat['deter'].shape)
+    return outs
+
 
 
 class SimpleEncoder(nj.Module):

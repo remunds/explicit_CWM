@@ -45,16 +45,16 @@ class Agent(nj.Module):
     embodied.print('Decoder:', {k: v.shape for k, v in dec_space.items()})
 
     # World Model
-    self.enc = {
-        'simple': bind(nets.SimpleEncoder, **config.enc.simple),
-    }[config.enc.typ](enc_space, name='enc')
-    self.dec = {
-        'simple': bind(nets.SimpleDecoder, **config.dec.simple),
-    }[config.dec.typ](dec_space, name='dec')
-    # self.enc = {'simple': bind(nets.DummyEncoder, **config.enc.simple),
+    # self.enc = {
+    #     'simple': bind(nets.SimpleEncoder, **config.enc.simple),
     # }[config.enc.typ](enc_space, name='enc')
-    # self.dec = {'simple': bind(nets.DummyDecoder, **config.dec.simple),
+    # self.dec = {
+    #     'simple': bind(nets.SimpleDecoder, **config.dec.simple),
     # }[config.dec.typ](dec_space, name='dec')
+    self.enc = {'simple': bind(nets.DummyEncoder, **config.enc.simple),
+    }[config.enc.typ](enc_space, name='enc')
+    self.dec = {'simple': bind(nets.DummyDecoder, **config.dec.simple),
+    }[config.dec.typ](dec_space, name='dec')
 
     self.dyn = {
         'rssm': bind(nets.RSSM, **config.dyn.rssm),

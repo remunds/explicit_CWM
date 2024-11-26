@@ -146,6 +146,19 @@ class MSEDist:
     else:
       raise NotImplementedError(self._agg)
     return -loss
+  
+class Always1Dist:
+  def __init__(self, shape, agg='sum'):
+    self.shape = shape[0:2] 
+
+  def mode(self):
+    return jnp.ones(self.shape) 
+
+  def mean(self):
+    return jnp.ones(self.shape) 
+
+  def log_prob(self, value):
+    return jnp.log(jnp.ones(self.shape))
 
 
 class HuberDist:

@@ -213,6 +213,7 @@ def grad(fun, keys, has_aux=False):
     strs = []
     for key in keys:
       if isinstance(key, Module):
+        import ipdb; ipdb.set_trace()
         matches = key.find()
       if isinstance(key, str):
         pattern = re.compile(f'^{key}(/.*|$)')

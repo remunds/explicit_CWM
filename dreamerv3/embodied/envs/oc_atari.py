@@ -18,8 +18,8 @@ class OCAtari(embodied.Env):
     self.minires = (48, 48, 1) 
     return {
         # use neurosymbolic input 
-        # 'nsrepr': embodied.Space(np.uint8, _space.shape),
-        'nsrepr': embodied.Space(np.uint8, self.minires), 
+        'nsrepr': embodied.Space(np.uint8, _space.shape),
+        # 'nsrepr': embodied.Space(np.uint8, self.minires), 
         'reward': embodied.Space(np.float32),
         'is_first': embodied.Space(bool),
         'is_last': embodied.Space(bool),
