@@ -199,10 +199,16 @@ atari:
   dec.spaces: 'image'
 
 oc_atari:
-  task: ALE/Pong-v5
+  task: ocatari_ALE/Pong-v5
   # env.atari.size: [48, 48]
-  (enc|dec).simple.minres: 3
   # (enc|dec).simple.minres: 2
+  (enc|dec).simple.minres: 3
+  # (enc|dec).dummy.minres: 3
+  #TODO: adapt, s.t. this can be used: 
+  # enc.typ: dummy
+  # dec.typ: dummy
+  # enc.dummy: {depth: 64, mults: [1, 2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, winit: normal, symlog: True, outer: True, kernel: 5, minres: 4}
+  # dec.dummy: {inputs: [deter, stoch], vecdist: symlog_mse, depth: 64, mults: [1, 2, 3, 4, 4], layers: 3, units: 1024, act: silu, norm: rms, outscale: 1.0, winit: normal, outer: True, kernel: 5, minres: 4, block_space: 8, block_fans: False, block_norm: False, hidden_stoch: True, space_hidden: 0}
   run:
     steps: 5.1e7
   enc.spaces: 'nsrepr'
@@ -284,7 +290,8 @@ multicpu:
 
 debug:
   # jax: {debug: True, jit: True, prealloc: False, platform: cpu, compute_dtype: bfloat16, profiler: False, checks: False}
-  jax: {debug: True, jit: True, prealloc: False, platform: gpu, compute_dtype: bfloat16, profiler: False, checks: False}
+  # jax: {debug: True, jit: True, prealloc: False, platform: gpu, compute_dtype: bfloat16, profiler: False, checks: False}
+  jax: {debug: False, jit: True, prealloc: True, platform: gpu, compute_dtype: bfloat16, profiler: False, checks: False}
   wrapper: {length: 100, checks: True}
   run: {num_envs: 4, eval_every: 10, log_every: 5, save_every: 15, train_ratio: 8, actor_batch: 2, driver_parallel: False}
   # run: {num_envs: 1, eval_every: 10, log_every: 5, save_every: 15, train_ratio: 8, actor_batch: 2, driver_parallel: False}

@@ -296,7 +296,6 @@ class SimpleEncoder(nj.Module):
       outs.append(x)
 
     if self.imgkeys:
-      print('ENC')
       x = self.imginp(data, bdims, jaxutils.COMPUTE_DTYPE) - 0.5
       x = x.reshape((-1, *x.shape[bdims:]))
       for i, depth in enumerate(self.depths):
@@ -304,7 +303,6 @@ class SimpleEncoder(nj.Module):
         x = self.get(f'conv{i}', Conv2D, depth, self.kernel, stride, **kw)(x)
       assert x.shape[-3] == x.shape[-2] == self.minres, x.shape
       x = x.reshape((x.shape[0], -1))
-      print(x.shape, 'out')
       outs.append(x)
 
     x = jnp.concatenate(outs, -1)
@@ -362,7 +360,6 @@ class SimpleDecoder(nj.Module):
 
     if self.imgkeys:
       inp = self.inp(lat, bdims, jaxutils.COMPUTE_DTYPE)
-      print('DEC')
       shape = (self.minres, self.minres, self.depths[-1])
       x = inp.reshape((-1, inp.shape[-1]))
 
@@ -386,7 +383,6 @@ class SimpleDecoder(nj.Module):
       else:
         x = self.get('space', Linear, shape, **kw)(x)
 
-      print(x.shape, 'in')
       for i, depth in reversed(list(enumerate(self.depths[:-1]))):
         x = self.get(
             f'conv{i}', Conv2D, depth, self.kernel, 2, **kw, transp=True)(x)
@@ -395,7 +391,6 @@ class SimpleDecoder(nj.Module):
       x = self.get(
           'imgout', Conv2D, self.imgdep, self.kernel, stride, **outkw)(x)
       x = jax.nn.sigmoid(x) if self.sigmoid else x + 0.5
-      print(x.shape, 'out')
       x = x.reshape((*inp.shape[:bdims], *x.shape[1:]))
       split = np.cumsum([self.spaces[k].shape[-1] for k in self.imgkeys][:-1])
       for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
