@@ -38,7 +38,6 @@ def train(make_agent, make_replay, make_env, make_logger, args):
 
   @embodied.timer.section('log_step')
   def log_step(tran, worker):
-
     episode = episodes[worker]
     episode.add('score', tran['reward'], agg='sum')
     episode.add('length', 1, agg='sum')

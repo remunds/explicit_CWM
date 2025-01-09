@@ -45,17 +45,22 @@ class Agent(nj.Module):
     embodied.print('Decoder:', {k: v.shape for k, v in dec_space.items()})
 
     # World Model
-    # self.enc = {
-    #     'simple': bind(nets.SimpleEncoder, **config.enc.simple),
-    # }[config.enc.typ](enc_space, name='enc')
-    # self.dec = {
-    #     'simple': bind(nets.SimpleDecoder, **config.dec.simple),
-    # }[config.dec.typ](dec_space, name='dec')
-    self.enc = {'simple': bind(nets.DummyEncoder, **config.enc.simple),
+    self.enc = {
+        'simple': bind(nets.SimpleEncoder, **config.enc.simple),
+        #TODO: Change to use config.enc.dummy
+        'dummy': bind(nets.DummyEncoder, **config.enc.simple),
     }[config.enc.typ](enc_space, name='enc')
-    self.dec = {'simple': bind(nets.DummyDecoder, **config.dec.simple),
+    self.dec = {
+        'simple': bind(nets.SimpleDecoder, **config.dec.simple),
+        #TODO: Change to use config.enc.dummy
+        'dummy': bind(nets.DummyDecoder, **config.dec.simple),
     }[config.dec.typ](dec_space, name='dec')
 
+    # self.enc = {'simple': bind(nets.DummyEncoder, **config.enc.simple),
+    # }[config.enc.typ](enc_space, name='enc')
+    # self.dec = {'simple': bind(nets.DummyDecoder, **config.dec.simple),
+    # }[config.dec.typ](dec_space, name='dec')
+    
     self.dyn = {
         'rssm': bind(nets.RSSM, **config.dyn.rssm),
     }[config.dyn.typ](name='dyn')
@@ -236,7 +241,11 @@ class Agent(nj.Module):
         k: jnp.concatenate([prevact[k][:, None], data[k][:, :-1]], 1)
         for k in self.act_space}
     prevacts = jaxutils.onehot_dict(prevacts, self.act_space)
+    # atari data: (16, 64, 96, 96, 1)
+    # ocatari data: (16, 64, 4, 6)
     embed = self.enc(data)
+    # atari embed: (16, 64, 2304)
+    # ocatari embed: (16, 64, 256)
     newlat, outs = self.dyn.observe(prevlat, prevacts, embed, data['is_first'])
     rew_feat = outs if self.config.reward_grad else sg(outs)
     dists = dict(

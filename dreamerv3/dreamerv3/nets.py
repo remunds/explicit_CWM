@@ -219,38 +219,109 @@ class RSSM(nj.Module):
   def _dist(self, logit):
     return tfd.Independent(jaxutils.OneHotDist(logit.astype(f32)), 1)
 
+# DummyEncoder/Decoder goal:
+# map from observation space to discrete representation z (onehot vectors)
 class DummyEncoder(nj.Module):
+  depth: int = 128
+  mults: tuple = (1, 2, 4, 2)
+  layers: int = 1
+  units: int = 128
+  symlog: bool = True
+  norm: str = 'rms'
+  act: str = 'gelu'
+  kernel: int = 4
+  outer: bool = False
+  minres: int = 4
+
   def __init__(self, spaces, **kw):
     self.spaces = spaces
-    self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
-    self.imgkeys = [k for k, s in spaces.items() if len(s.shape) == 3]
-    self.vecinp = Input(self.veckeys, featdims=1)
-    self.imginp = Input(self.imgkeys, featdims=3)
     self.kw = kw
-    self.obs_shape = spaces['nsrepr'].shape[0] * spaces['nsrepr'].shape[1]
+
+    self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
+    self.vecinp = Input(self.veckeys, featdims=1)
   
   def __call__(self, data, bdims=2):
-    # shape: (4,11,2,6)
-    # reshape to: (4,11,12)
-    data_shape = data['nsrepr'].shape
-    return data['nsrepr'].reshape((*data_shape[0:2], -1))
-  
+    # 16, 64, 4, 6 (batch_size, window_size, n_obj)
+    kw = dict(**self.kw, norm=self.norm, act=self.act)
+    shape = data['is_first'].shape[:bdims]
+    data = {k: data[k] for k in self.spaces}
+
+    if self.veckeys:
+      x = self.vecinp(data, bdims, f32)# merges last two dims: (16, 64, 24)
+      x = x.reshape((-1, *x.shape[bdims:]))   # merges first two dims: (1024, 24)
+      x = jaxutils.symlog(x) if self.symlog else x
+      x = jaxutils.cast_to_compute(x)
+      for i in range(self.layers):
+        x = self.get(f'mlp{i}', Linear, self.units, **kw)(x)
+        # rescales to self.units
+        #shape: (1024, 256)
+    else:
+      import ipdb; ipdb.set_trace()
+      
+    x = x.reshape((*shape, *x.shape[1:]))
+    #shape: (16, 64, 256)
+    return x
+
 class DummyDecoder(nj.Module):
-  # inputs: tuple = ('deter', 'stoch')
+
+  inputs: tuple = ('deter', 'stoch')
+  depth: int = 128
+  mults: tuple = (1, 2, 4, 3)
+  sigmoid: bool = True
+  layers: int = 5
+  units: int = 1024
+  norm: str = 'rms'
+  act: str = 'gelu'
+  outscale: float = 1.0
+  vecdist: str = 'symlog_mse'
+  kernel: int = 4
+  outer: bool = False
+  block_fans: bool = False
+  block_norm: bool = False
+  block_space: int = 0
+  hidden_stoch: bool = False
+  space_hidden: int = 0
+  minres: int = 4
+
   def __init__(self, spaces, **kw):
-    self.spaces = spaces
+    self.inp = Input(self.inputs, featdims=1)
     self.veckeys = [k for k, s in spaces.items() if len(s.shape) <= 2]
     self.imgkeys = [k for k, s in spaces.items() if len(s.shape) == 3]
-    self.keys = [k for k, s in spaces.items()]
-    # self.kw = kw
-    # self.inp = Input(self.inputs, featdims=1)
+    self.spaces = spaces
+    self.imgsize = np.prod(spaces['nsobs'].shape).item()
+    self.depths = tuple([self.depth * mult for mult in self.mults])
+    self.imgdep = sum(self.spaces[k].shape[-1] for k in self.imgkeys)
+    self.kw = kw
+
   
   def __call__(self, lat, bdims=2):
-    # inp = self.inp(lat, bdims, jaxutils.COMPUTE_DTYPE)
-    # return {"nsrepr": lat.reshape((-1, *lat.shape[bdims:]))}
+    kw = dict(**self.kw, norm=self.norm, act=self.act)
     outs = {}
-    for k in self.keys: 
-      outs[k] = jaxutils.Always1Dist(lat['deter'].shape)
+
+    if self.veckeys:
+      inp = self.inp(lat, bdims, jaxutils.COMPUTE_DTYPE)
+      # shuold be 16,64, ...
+      # for return, we want MSEDist with shape 16,64, 4, 6
+      x = inp.reshape((-1, inp.shape[-1])) #(1024, 2560)
+      for i in range(self.layers):
+        x = self.get(f'mlp{i}', Linear, self.units, **kw)(x)
+      x = self.get(f'mlp_out', Linear, self.imgsize, **kw)(x)
+      #(1024, 256) ?
+      x = x.reshape((*inp.shape[:bdims], *x.shape[1:]))
+      for k in self.veckeys:
+        dist = (
+            dict(dist='softmax', bins=self.spaces[k].classes)
+            if self.spaces[k].discrete else dict(dist=self.vecdist))
+        k = k.replace('/', '_')
+
+        # TODO: not sure if we can use dim=1 here, or if we need
+        # to match the original shape (or dim=3?)
+        # edit: need original shape (16, 64, 4, 6) here
+        # but how??
+        x = x.reshape((*inp.shape[:bdims], self.spaces[k].shape[-2], self.spaces[k].shape[-1]))
+        outs[k] = jaxutils.MSEDist(f32(x), 2, 'sum')
+    else:
+      import ipdb; ipdb.set_trace()
     return outs
 
 
@@ -359,6 +430,7 @@ class SimpleDecoder(nj.Module):
         outs[k] = self.get(f'out_{k}', Dist, self.spaces[k].shape, **dist)(x)
 
     if self.imgkeys:
+      # inp shape here: (16, 64, 2560)
       inp = self.inp(lat, bdims, jaxutils.COMPUTE_DTYPE)
       shape = (self.minres, self.minres, self.depths[-1])
       x = inp.reshape((-1, inp.shape[-1]))
@@ -394,6 +466,7 @@ class SimpleDecoder(nj.Module):
       x = x.reshape((*inp.shape[:bdims], *x.shape[1:]))
       split = np.cumsum([self.spaces[k].shape[-1] for k in self.imgkeys][:-1])
       for k, out in zip(self.imgkeys, jnp.split(x, split, -1)):
+        # shape here: (16, 64, 96, 96, 1)
         outs[k] = jaxutils.MSEDist(f32(out), 3, 'sum')
     return outs
 

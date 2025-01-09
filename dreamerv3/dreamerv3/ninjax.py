@@ -209,7 +209,6 @@ def grad(fun, keys, has_aux=False):
 
   def wrapper(*args, **kwargs):
     accessed, modified = _prerun(fun, *args, **kwargs)
-
     strs = []
     for key in keys:
       if isinstance(key, Module):

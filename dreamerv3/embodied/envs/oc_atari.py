@@ -14,12 +14,9 @@ class OCAtari(embodied.Env):
   @property
   def obs_space(self):
     _space = self._env.observation_space
-    # self.minires = (_space.shape[1], _space.shape[1], 1) 
-    self.minires = (48, 48, 1) 
     return {
         # use neurosymbolic input 
-        'nsrepr': embodied.Space(np.uint8, _space.shape),
-        # 'nsrepr': embodied.Space(np.uint8, self.minires), 
+        'nsobs': embodied.Space(np.int32, _space.shape),
         'reward': embodied.Space(np.float32),
         'is_first': embodied.Space(bool),
         'is_last': embodied.Space(bool),
@@ -36,24 +33,21 @@ class OCAtari(embodied.Env):
   def step(self, action):
     if action['reset'] or self._done:
       self._done = False
-      ns_repr, info = self._env.reset()
-      # ns_repr shape is (2, 6), make it (6, 6, 1)
-      ns_repr = ns_repr.repeat(24, axis=0).repeat(8, axis=1)[..., np.newaxis].astype(np.uint8)
-      return self._obs(ns_repr, 0.0, info, is_first=True)
-    ns_repr, reward, truncated, terminated, info = self._env.step(action['action'])
-    ns_repr = ns_repr.repeat(24, axis=0).repeat(8, axis=1)[..., np.newaxis].astype(np.uint8)
+      ns_obs, info = self._env.reset()
+      # ns_obs shape is (2, 6), make it (6, 6, 1)
+      # ns_state shape is (4, 6) (6: x,y for player, ball, enemy)
+      return self._obs(ns_obs, 0.0, info, is_first=True)
+    ns_obs, reward, truncated, terminated, info = self._env.step(action['action'])
     return self._obs(
-        ns_repr, reward, info,
-        # is_last=(truncated or terminated),
-        is_last=truncated,
-        # is_terminal=info['discount'] == 0)
+        ns_obs, reward, info,
+        is_last=(truncated or terminated),
         is_terminal=terminated)
 
   def _obs(
-      self, ns_repr, reward, info,
+      self, ns_obs, reward, info,
       is_first=False, is_last=False, is_terminal=False):
     obs = dict(
-        nsrepr=ns_repr,
+        nsobs=ns_obs.astype(np.int32),
         reward=np.float32(reward),
         is_first=is_first,
         is_last=is_last,
