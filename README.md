@@ -1,3 +1,26 @@
+## UV
+Setup and run env with UV.
+1. 
+```bash
+uv venv --python=3.10
+```
+2. 
+```bash
+uv pip install -r dreamerv3/requirements.txt
+```
+3. 
+```bash
+uv pip install git+https://github.com/k4ntz/JAXAtari@fdc97d1ff3abd73f8533f08d2b6dc1def7a79b60
+```
+4. 
+```bash
+uv pip install -U jax==0.4.38 wandb[media]
+```
+5. 
+```bash
+uv run dreamerv3/main.py --logdir ./logdir/dreamer/{timestamp} --configs atari --task atari_pong
+```
+
 ## Docker 
 
 ### Development Setup
