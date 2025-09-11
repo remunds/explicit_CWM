@@ -9,10 +9,15 @@ import jax
 
 class JAXAtari(embodied.Env):
 
-  def __init__(self, env_name, size=(84,84), seed=None):
+  def __init__(self, env_name, size=(84,84), object_centric=False, seed=None):
     import jaxatari 
-    from jaxatari.wrappers import AtariWrapper, ObjectCentricWrapper, PixelObsWrapper, LogWrapper
-    self._env = PixelObsWrapper(AtariWrapper(jaxatari.make(env_name), frame_stack_size=1), do_pixel_resize=True, grayscale=True, pixel_resize_shape=size)
+    from jaxatari.wrappers import AtariWrapper, ObjectCentricWrapper, PixelObsWrapper, FlattenObservationWrapper
+    base_env = jaxatari.make(env_name)
+    atari_env = AtariWrapper(base_env, frame_stack_size=1)
+    if object_centric:
+      self._env = FlattenObservationWrapper(ObjectCentricWrapper(atari_env))
+    else:
+      self._env = PixelObsWrapper(atari_env, do_pixel_resize=True, grayscale=True, pixel_resize_shape=size)
     self._done = True
     self.rng = jax.random.PRNGKey(seed)
     self.last_state = self._env.reset(self.rng)[1]
@@ -39,18 +44,19 @@ class JAXAtari(embodied.Env):
     }
 
   @functools.partial(jax.jit, static_argnums=0)
-  def _reset(self):
-    print("reset jaxatari")
-    self.last_state = self._env.reset(self.rng)[1]
-    self.prev_done = True
+  def reset(self, rng):
+    return self._env.reset(rng)
 
-  @functools.partial(jax.jit, static_argnums=0)
+  # @functools.partial(jax.jit, static_argnums=0)
   def step(self, action):
-    print("step jaxatari")
+    # couldn't jit here due to the self calls and setting it to static
     first = False
     if self.prev_done:
       first = True
+      obs, state = self._env.reset(self.rng)
     obs, state, reward, done, info = self._env.step(self.last_state, action['action'])
+    # remove batch dim
+    obs = obs[0]
     self.last_state = state
     self.prev_done = done
     return self._obs(
@@ -61,12 +67,25 @@ class JAXAtari(embodied.Env):
     )
 
   @functools.partial(jax.jit, static_argnums=0)
+  def vec_step(self, action, state):
+    first = False
+    obs, state, reward, done, info = self._env.step(state, action)
+    # remove batch dim
+    obs = obs[0]
+    return self._obs(
+        obs, reward, info,
+        is_first=first,
+        is_last=done,
+        is_terminal=done,
+    ), state
+
+  @functools.partial(jax.jit, static_argnums=0)
   def _obs(
       self, obs, reward, info,
       is_first=False, is_last=False, is_terminal=False):
     obs = dict(
-        image=obs.astype(np.int32),
-        reward=np.float32(reward),
+        image=obs.astype(np.uint8),
+        reward=reward.astype(np.float32),
         is_first=is_first,
         is_last=is_last,
         is_terminal=is_terminal,
@@ -75,6 +94,7 @@ class JAXAtari(embodied.Env):
 
 
   def render(self):
+    # Think this is only needed for object-centric jaxatari.
     print("Render not implemented.")
     exit()
     return self._env.render()
