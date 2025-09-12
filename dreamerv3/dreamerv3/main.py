@@ -153,6 +153,7 @@ def make_logger(config):
   step = elements.Counter()
   logdir = config.logdir
   multiplier = config.env.get(config.task.split('_')[0], {}).get('repeat', 1)
+  print('Log multiplier:', multiplier)
   outputs = []
   outputs.append(elements.logger.TerminalOutput(config.logger.filter, 'Agent'))
   for output in config.logger.outputs:

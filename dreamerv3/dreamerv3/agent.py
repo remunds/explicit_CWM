@@ -81,6 +81,7 @@ class Agent(embodied.jax.Agent):
     rec = scales.pop('rec')
     scales.update({k: rec for k in dec_space})
     self.scales = scales
+    print("Initialized Agent:", self)
 
   @property
   def policy_keys(self):

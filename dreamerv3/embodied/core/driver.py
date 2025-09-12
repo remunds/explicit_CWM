@@ -79,23 +79,14 @@ class Driver:
       obs = [self._receive(pipe) for pipe in self.pipes]
       obs = {k: np.stack([x[k] for x in obs]) for k in obs[0].keys()}
     elif self.vectorized:
-      # TODO: probably not required, since jaxatari automatically resets
-      # Only the is_first is actually needed I think
-      def reset_if_needed(condition, idx):
-        is_first, new_state = jax.lax.cond(
-          condition,
-          lambda: (True, jax.tree.map(lambda x: x[idx], self.reset_state)),
-          lambda: (False, jax.tree.map(lambda x: x[idx], self.vec_last_state)), 
-        )
-        return is_first, new_state
-      is_firsts, states = jax.vmap(reset_if_needed)(self.vec_prev_obs['is_last'], jnp.arange(self.length))
-      # unpack acts list of dicts into jnp array
+      states = self.vec_last_state
       act = jnp.array([a['action'] for a in acts])
       step_output = jax.vmap(self.envs[0].vec_step)(act, states)
-      self.vec_prev_obs = step_output[0] # (dict of arrays)
       # overwrite is_first for all prev is_last ones (since they were reset)
-      self.vec_prev_obs['is_first'] = is_firsts
+      was_last = self.vec_prev_obs['is_last']
+      self.vec_prev_obs = step_output[0] # (dict of arrays)
       self.vec_last_state = step_output[1]
+      self.vec_prev_obs['is_first'] = was_last
       # obs is already batched dict of arrays
       obs = self.vec_prev_obs  # obs[image] has shape (4, 84, 84, 1)
     else:

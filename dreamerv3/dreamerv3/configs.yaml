@@ -28,7 +28,7 @@ defaults:
 
   env:
     atari: {size: [96, 96], repeat: 4, sticky: True, gray: True, actions: all, lives: unused, noops: 30, autostart: False, pooling: 2, aggregate: max, resize: pillow, clip_reward: False}
-    jaxatari: {size: [96, 96], seed: 0} 
+    jaxatari: {size: [96, 96], object_centric: False, seed: 0} 
     procgen: {size: [96, 96], resize: pillow}
     crafter: {size: [64, 64], logs: False}
     atari100k: {size: [64, 64], repeat: 4, sticky: False, gray: False, actions: needed, lives: unused, noops: 30, autostart: False, resize: pillow, clip_reward: False}
@@ -53,8 +53,7 @@ defaults:
     log_every: 120
     report_every: 300
     save_every: 900
-    # envs: 16
-    envs: 128
+    envs: 16
     eval_envs: 4
     eval_eps: 1
     report_batches: 1
@@ -168,9 +167,14 @@ atari:
   run: {steps: 5.1e7, train_ratio: 32}
 
 jaxatari:
+  <<: *size1m # for oc
   task: jaxatari_pong
-  run: {steps: 5.1e7, train_ratio: 32, vectorized: False} # for now: non-vectorized is faster :(
+  # Note that GPU and vectorized runs only make sense with a high number of envs,
+  # since each step is done isolated and is NOT vectorized :(
+  # -> we only vmap over the envs for a single step
+  run: {steps: 5.1e7, train_ratio: 32, envs: 128, vectorized: True} 
   jax: {transfer_guard: False} # necessary to run.
+  env.jaxatari.object_centric: True
 
 procgen:
   task: procgen_coinrun
