@@ -78,12 +78,15 @@ class RSSM(nj.Module):
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
     deter = self._core(deter, stoch, action)
+    print("deter shape: ", deter.shape)
     tokens = tokens.reshape((*deter.shape[:-1], -1))
     x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
     for i in range(self.obslayers):
       x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+    print("x shape: ", x.shape)
     logit = self._logit('obslogit', x)
+    print("logit shape: ", logit.shape)
     stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
     carry = dict(deter=deter, stoch=stoch)
     feat = dict(deter=deter, stoch=stoch, logit=logit)
@@ -175,6 +178,42 @@ class RSSM(nj.Module):
     out = embodied.jax.outs.Agg(out, 1, jnp.sum)
     return out
 
+class DummyEncoder:#(nj.Module):
+  """
+  Goal: Pass inputs as-is, without any changes.
+  """
+  depth: int = 64
+  mults: tuple = (2, 3, 4, 4)
+
+  def __init__(self, obs_space, **kw):
+    assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
+    self.obs_space = obs_space
+    self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
+    self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
+    self.depths = tuple(self.depth * mult for mult in self.mults)
+    self.kw = kw
+    # dummy param to make ninjax happy
+    # self.dummy = self.sub('enc', nn.Linear, 1)
+
+  @property
+  def entry_space(self):
+    return {}
+
+  def initial(self, batch_size):
+    return {}
+
+  def truncate(self, entries, carry=None):
+    return {}
+
+  def __call__(self, carry, obs, reset, training, single=False):
+    bdims = 1 if single else 2
+    outs = []
+    bshape = reset.shape
+    # TODO: "obs" key is hardcoded here, need to generalize
+    x = obs["obs"]
+    tokens = x
+    entries = {}
+    return carry, entries, tokens
 
 class Encoder(nj.Module):
 

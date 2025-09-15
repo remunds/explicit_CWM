@@ -39,7 +39,8 @@ class Agent(embodied.jax.Agent):
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
     dec_space = {k: v for k, v in obs_space.items() if k not in exclude}
     self.enc = {
-        'simple': rssm.Encoder,
+        # 'simple': rssm.Encoder,
+        'simple': rssm.DummyEncoder,
     }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
     self.dyn = {
         'rssm': rssm.RSSM,
@@ -71,8 +72,10 @@ class Agent(embodied.jax.Agent):
     self.valnorm = embodied.jax.Normalize(**config.valnorm, name='valnorm')
     self.advnorm = embodied.jax.Normalize(**config.advnorm, name='advnorm')
 
+    # self.modules = [
+    #     self.dyn, self.enc, self.dec, self.rew, self.con, self.pol, self.val]
     self.modules = [
-        self.dyn, self.enc, self.dec, self.rew, self.con, self.pol, self.val]
+        self.dyn, self.dec, self.rew, self.con, self.pol, self.val]
     self.opt = embodied.jax.Optimizer(
         self.modules, self._make_opt(**config.opt), summary_depth=1,
         name='opt')
@@ -117,7 +120,20 @@ class Agent(embodied.jax.Agent):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry
     kw = dict(training=False, single=True)
     reset = obs['is_first']
+    # naming of paper/book and code:
+      # - tokens = o_t (embedded image)
+      # - deter = h_t = f(h_{t-1}, z_{t-1}, a_{t-1}) #deterministic state from prev deter, stoch and act
+      # - logit = p(z_t|h_t, o_t) #distribution
+      # - stoch = z_t ~ logit #sample from distribution
+      # - prior = \hat{z}_t is then deter/h_t fed through MLP 
+      # - post == logit
+
+    # encoder produces tokens (simply dimensionally reduced (and activated) obs)
     enc_carry, enc_entry, tokens = self.enc(enc_carry, obs, reset, **kw)
+    # dyn observe produces feats: (deter, stoch, logit) based on tokens and previous (deter, stoch and action)
+      # within observe is _core, which is the actual LSTM step, where deter is generated using prev (deter, stoch, act)
+      # stoch and logit are then generated using the output deter and the tokens (which come from the encoder)
+      # whereas stoch is just a sample from the logit distribution
     dyn_carry, dyn_entry, feat = self.dyn.observe(
         dyn_carry, tokens, prevact, reset, **kw)
     dec_entry = {}

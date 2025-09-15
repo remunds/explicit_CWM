@@ -176,6 +176,13 @@ jaxatari:
   jax: {transfer_guard: False} # necessary to run.
   env.jaxatari.object_centric: True
 
+  agent:
+  # e.g. pong has (x,y,w,h of ball, player, enemy + score_player, score_enemy) == 14
+  # for now: map num_entities to stoch, num_attributes to classes
+  # deter must be divisble by blocks
+    .*\.rssm: {deter: 14, stoch: 4, hidden: 32, classes: 3, blocks: 7} # c
+    .*\.decoder: {deter: 14, stoch: 4, hidden: 32, classes: 3, blocks: 7} # c
+
 procgen:
   task: procgen_coinrun
   run: {steps: 1.1e8, train_ratio: 64}

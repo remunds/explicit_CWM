@@ -32,12 +32,9 @@ class JAXAtari(embodied.Env):
     if self.object_centric:
       key = 'log/image' 
       # obs_space[0] -> img, [1] -> objects
-      #TODO: currently broken:
-      # _img, _obj = _space
-      # img_shape = _img.shape[1:]
-      # obj_shape = _obj.shape[1:]
-      img_shape = (96, 96, 1)
-      obj_shape = (14,)
+      _img, _obj = _space
+      img_shape = _img.shape[1:]
+      obj_shape = _obj.shape[1:]
     else:
       key = 'image'
       img_shape = _space.shape[1:]
@@ -68,14 +65,7 @@ class JAXAtari(embodied.Env):
     # couldn't jit here due to the self calls and setting it to static
     first = False
     obs, state, reward, done, info = self._env.step(self.last_state, action['action'])
-    # remove batch dim
     obs = (obs[0][0], obs[1][0]) if self.object_centric else obs[0]
-    # if self.object_centric:
-    #   img, obj = obs
-    # else:
-    #   img = obs
-    # remove batch dim
-    # img = img[0]
 
     self.last_state = state
     # self.prev_done = done
@@ -92,7 +82,6 @@ class JAXAtari(embodied.Env):
     obs, state, reward, done, info = self._env.step(state, action)
     # remove batch dim
     obs = (obs[0][0], obs[1][0]) if self.object_centric else obs[0]
-    print(obs)
     return self._obs(
         obs, reward, info,
         is_first=first,
@@ -117,10 +106,3 @@ class JAXAtari(embodied.Env):
     else:
       obs_out['image'] = obs.astype(np.uint8)
     return obs_out
-
-
-  def render(self):
-    # Think this is only needed for object-centric jaxatari.
-    print("Render not implemented.")
-    exit()
-    return self._env.render()
