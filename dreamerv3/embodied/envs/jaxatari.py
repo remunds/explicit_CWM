@@ -11,12 +11,13 @@ from jaxatari.wrappers import AtariWrapper, PixelAndObjectCentricWrapper, PixelO
 
 class JAXAtari(embodied.Env):
 
-  def __init__(self, env_name, size=(84,84), object_centric=False, seed=None):
-    self.object_centric = object_centric
-    print("JAXAtari Env. Object-centric:", object_centric)
+  def __init__(self, env_name, size=(84,84), obs_mode=False, seed=None):
+    # obs_mode: "pixel", "oc", "both"
+    self.obs_mode = obs_mode
+    print("JAXAtari Env. obs_mode:", obs_mode)
     base_env = jaxatari.make(env_name)
     atari_env = AtariWrapper(base_env, frame_stack_size=1)
-    if object_centric:
+    if obs_mode == "oc" or obs_mode == "both":
       self._env = PixelAndObjectCentricWrapper(atari_env, do_pixel_resize=True, grayscale=True, pixel_resize_shape=size)
     else:
       self._env = PixelObsWrapper(atari_env, do_pixel_resize=True, grayscale=True, pixel_resize_shape=size)
@@ -29,15 +30,15 @@ class JAXAtari(embodied.Env):
   def obs_space(self):
     _space = self._env.observation_space()
     # remove leading batch dimension
-    if self.object_centric:
+    if self.obs_mode == "oc":
       key = 'log/image' 
       # obs_space[0] -> img, [1] -> objects
       _img, _obj = _space
       img_shape = _img.shape[1:]
-      obj_shape = _obj.shape[1:]
     else:
       key = 'image'
-      img_shape = _space.shape[1:]
+      img_shape = _space.shape[1:] if self.obs_mode == "pixel" else _space[0].shape[1:]
+
     obs_dict = {
         key: elements.Space(np.uint8, img_shape),
         'reward': elements.Space(np.float32),
@@ -45,8 +46,13 @@ class JAXAtari(embodied.Env):
         'is_last': elements.Space(bool),
         'is_terminal': elements.Space(bool),
     }
-    if self.object_centric:
-      obs_dict['obs'] = elements.Space(np.int32, obj_shape, low=0, high=255)
+    if self.obs_mode == "oc" or self.obs_mode == "both":
+      # add object-centric observation space
+      _img, _obj = _space
+      obj_shape = list(_obj.shape[1:])
+      obj_shape[-1] -= 2  # remove last 2 attributes (player/enemy scores) in pong
+      obj_shape = tuple(obj_shape)
+      obs_dict['oc'] = elements.Space(np.int32, obj_shape, low=0, high=255)
     return obs_dict
 
   @property
@@ -64,9 +70,9 @@ class JAXAtari(embodied.Env):
   def step(self, action):
     # couldn't jit here due to the self calls and setting it to static
     first = False
-    obs, state, reward, done, info = self._env.step(self.last_state, action['action'])
-    obs = (obs[0][0], obs[1][0]) if self.object_centric else obs[0]
 
+    obs, state, reward, done, info = self._env.step(self.last_state, action['action'])
+    obs = (obs[0][0], obs[1][0]) if self.obs_mode == "oc" or self.obs_mode == "both" else obs[0]
     self.last_state = state
     # self.prev_done = done
     return self._obs(
@@ -81,7 +87,7 @@ class JAXAtari(embodied.Env):
     first = False
     obs, state, reward, done, info = self._env.step(state, action)
     # remove batch dim
-    obs = (obs[0][0], obs[1][0]) if self.object_centric else obs[0]
+    obs = (obs[0][0], obs[1][0]) if self.obs_mode == "oc" or self.obs_mode == "both" else obs[0]
     return self._obs(
         obs, reward, info,
         is_first=first,
@@ -99,10 +105,14 @@ class JAXAtari(embodied.Env):
         is_last=is_last,
         is_terminal=is_terminal,
     )
-    if self.object_centric:
+    if self.obs_mode == "oc":
       img, obj = obs
-      obs_out['obs'] = obj.astype(np.int32)
+      obs_out['oc'] = obj[..., :-2].astype(np.int32) #removing last 2 attributes (player/enemy scores) in pong
       obs_out['log/image'] = img.astype(np.uint8)
+    elif self.obs_mode == "both":
+      img, obj = obs
+      obs_out['oc'] = obj[..., :-2].astype(np.int32) #removing last 2 attributes (player/enemy scores) in pong
+      obs_out['image'] = img.astype(np.uint8)
     else:
       obs_out['image'] = obs.astype(np.uint8)
     return obs_out

@@ -30,6 +30,7 @@ class RSSM(nj.Module):
   absolute: bool = False
   blocks: int = 8
   free_nats: float = 1.0
+  oc_tokens: int = 0 # defines how many tokens in front correspond to object-centric input. If None, no OC input.
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
@@ -78,16 +79,18 @@ class RSSM(nj.Module):
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
     deter = self._core(deter, stoch, action)
-    print("deter shape: ", deter.shape)
-    tokens = tokens.reshape((*deter.shape[:-1], -1))
-    x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
-    for i in range(self.obslayers):
-      x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
-      x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
-    print("x shape: ", x.shape)
-    logit = self._logit('obslogit', x)
-    print("logit shape: ", logit.shape)
-    stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+    if self.oc_tokens != 0:
+      # directly use object-centric input as stoch state (posterior)
+      stoch = tokens[..., :self.oc_tokens].reshape(stoch.shape[:-2] + (self.stoch, self.classes))
+      logit = jnp.zeros(stoch.shape,dtype=nn.COMPUTE_DTYPE)
+    else:
+      tokens = tokens.reshape((*deter.shape[:-1], -1))
+      x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
+      for i in range(self.obslayers):
+        x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      logit = self._logit('obslogit', x)
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
     carry = dict(deter=deter, stoch=stoch)
     feat = dict(deter=deter, stoch=stoch, logit=logit)
     entry = dict(deter=deter, stoch=stoch)
@@ -121,10 +124,16 @@ class RSSM(nj.Module):
       return carry, feat, action
 
   def loss(self, carry, tokens, acts, reset, training):
+    #TODO: Replace dyn/rep with KL to OC map. 
     metrics = {}
     carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
     prior = self._prior(feat['deter'])
-    post = feat['logit']
+    # Replace posterior with OC map
+    if self.oc_tokens != 0: 
+      # post = tokens[..., :self.oc_tokens].reshape(feat['stoch'].shape)
+      post = feat['stoch']
+    else:
+      post = feat['logit']
     dyn = self._dist(sg(post)).kl(self._dist(prior))
     rep = self._dist(post).kl(self._dist(sg(prior)))
     if self.free_nats:
@@ -180,20 +189,15 @@ class RSSM(nj.Module):
 
 class DummyEncoder:#(nj.Module):
   """
-  Goal: Pass inputs as-is, without any changes.
+  Pass inputs as-is, without any changes. This is useful for object-centric inputs.
   """
-  depth: int = 64
-  mults: tuple = (2, 3, 4, 4)
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
     self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
     self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
-    self.depths = tuple(self.depth * mult for mult in self.mults)
     self.kw = kw
-    # dummy param to make ninjax happy
-    # self.dummy = self.sub('enc', nn.Linear, 1)
 
   @property
   def entry_space(self):
@@ -206,15 +210,11 @@ class DummyEncoder:#(nj.Module):
     return {}
 
   def __call__(self, carry, obs, reset, training, single=False):
-    bdims = 1 if single else 2
-    outs = []
-    bshape = reset.shape
-    # TODO: "obs" key is hardcoded here, need to generalize
-    x = obs["obs"]
+    x = obs["oc"]
     tokens = x
     entries = {}
     return carry, entries, tokens
-
+  
 class Encoder(nj.Module):
 
   units: int = 1024
@@ -227,6 +227,7 @@ class Encoder(nj.Module):
   symlog: bool = True
   outer: bool = False
   strided: bool = False
+  oc_passthrough: bool = True  # If True, pass object-centric obs as-is.
 
   def __init__(self, obs_space, **kw):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
@@ -251,7 +252,12 @@ class Encoder(nj.Module):
     outs = []
     bshape = reset.shape
 
-    if self.veckeys:
+    if self.oc_passthrough and 'oc' in self.veckeys:
+      x = obs['oc']
+      x = x.reshape((-1, *x.shape[bdims:]))
+      outs.append(x)
+
+    elif self.veckeys:
       vspace = {k: self.obs_space[k] for k in self.veckeys}
       vecs = {k: obs[k] for k in self.veckeys}
       squish = nn.symlog if self.symlog else lambda x: x

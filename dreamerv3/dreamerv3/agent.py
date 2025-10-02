@@ -39,8 +39,8 @@ class Agent(embodied.jax.Agent):
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
     dec_space = {k: v for k, v in obs_space.items() if k not in exclude}
     self.enc = {
-        # 'simple': rssm.Encoder,
-        'simple': rssm.DummyEncoder,
+        'simple': rssm.Encoder,
+        'dummy': rssm.DummyEncoder,
     }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
     self.dyn = {
         'rssm': rssm.RSSM,
@@ -72,10 +72,17 @@ class Agent(embodied.jax.Agent):
     self.valnorm = embodied.jax.Normalize(**config.valnorm, name='valnorm')
     self.advnorm = embodied.jax.Normalize(**config.advnorm, name='advnorm')
 
-    # self.modules = [
-    #     self.dyn, self.enc, self.dec, self.rew, self.con, self.pol, self.val]
+    #TODO: Currently decoder decodes to oc-space. Meaning we do oc in, oc out, rssm on some equal repres as OC
+    # -> We can always decode to OC space to observe dyn. But this is not explicitly enforcing oc on the latent space. 
+    # To do this, we could: 
+    # 1) add an additional loss that forces the latent space to predict the oc representation (e.g. MSE between oc input and stoch)
+    # 2) change the decoder to decode to image space and regularize the latent space via KL/MSE to OC input
+    # -> See logseq for details
     self.modules = [
         self.dyn, self.dec, self.rew, self.con, self.pol, self.val]
+    if not isinstance(self.enc, rssm.DummyEncoder):
+    # Note how self.enc is not in modules anymore if DummyEncoder-> no param updates
+      self.modules += [self.enc]
     self.opt = embodied.jax.Optimizer(
         self.modules, self._make_opt(**config.opt), summary_depth=1,
         name='opt')
@@ -266,6 +273,7 @@ class Agent(embodied.jax.Agent):
       return carry, {}
 
     carry, obs, prevact, _ = self._apply_replay_context(carry, data)
+    #TODO: log/img is not part of obs keys here :( -> find way to include it, s.t. we can log it.
     (enc_carry, dyn_carry, dec_carry) = carry
     B, T = obs['is_first'].shape
     RB = min(6, B)

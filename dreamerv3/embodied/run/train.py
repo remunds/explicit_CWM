@@ -4,6 +4,7 @@ from functools import partial as bind
 import elements
 import embodied
 import numpy as np
+from rtpt import RTPT
 
 
 def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
@@ -98,9 +99,14 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
   cp.load_or_save()
 
   print('Start training loop')
+  rtpt = RTPT(name_initials='RE', experiment_name='Dreamerv3', max_iterations=args.steps)
   policy = lambda *args: agent.policy(*args, mode='train')
   driver.reset(agent.init_policy)
+  rtpt.start()
   while step < args.steps:
+    # since rtpt does not support more than single step increments (n_env increments)
+    for _ in range(args.envs):
+      rtpt.step()
 
     driver(policy, steps=10)
 
