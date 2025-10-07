@@ -78,11 +78,32 @@ class RSSM(nj.Module):
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
-    deter = self._core(deter, stoch, action)
+
+    if self.single_oc:
+      new_deter = jnp.zeros_like(deter)
+      for obj_attribute in range(self.stoch):
+        # TODO: make sure that _core is choosing the correct subnet
+        # Since we want to use one subnet for each object-type!
+        #TODO: also pass all attributes of an object, not just one!
+        deter_dim = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
+        new_deter.at[:, obj_attribute].set(deter_dim) 
+      deter = new_deter
+    else:
+      deter = self._core(deter, stoch, action)
+
     if self.oc_tokens != 0:
-      # directly use object-centric input as stoch state (posterior)
-      stoch = tokens[..., :self.oc_tokens].reshape(stoch.shape[:-2] + (self.stoch, self.classes))
-      logit = jnp.zeros(stoch.shape,dtype=nn.COMPUTE_DTYPE)
+      # additionally use object-centric input as posterior 
+      oc = tokens[..., :self.oc_tokens]
+      oc_logit = nn.cast(jax.nn.one_hot(oc, self.classes, axis=-1)) # shape (..., oc_tokens, classes), pong: (1, 14, 256)
+      img_tokens = tokens[..., self.oc_tokens:].reshape((*deter.shape[:-1], -1))
+      x = img_tokens if self.absolute else jnp.concatenate([deter, img_tokens], -1)
+      for i in range(self.obslayers):
+        x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      img_logit = self._logit('obslogit', x, additional_to_oc=True) #shape (..., n_img_dim, classes), pong: (1, 2, 256)
+      logit = jnp.concatenate([oc_logit, img_logit], axis=-2) # concat along object/attribute dim, not n_values
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+
     else:
       tokens = tokens.reshape((*deter.shape[:-1], -1))
       x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
@@ -102,7 +123,7 @@ class RSSM(nj.Module):
       action = policy(sg(carry)) if callable(policy) else policy
       actemb = nn.DictConcat(self.act_space, 1)(action)
       deter = self._core(carry['deter'], carry['stoch'], actemb)
-      logit = self._prior(deter)
+      logit = self._prior(deter) 
       stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
@@ -124,16 +145,10 @@ class RSSM(nj.Module):
       return carry, feat, action
 
   def loss(self, carry, tokens, acts, reset, training):
-    #TODO: Replace dyn/rep with KL to OC map. 
     metrics = {}
     carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
     prior = self._prior(feat['deter'])
-    # Replace posterior with OC map
-    if self.oc_tokens != 0: 
-      # post = tokens[..., :self.oc_tokens].reshape(feat['stoch'].shape)
-      post = feat['stoch']
-    else:
-      post = feat['logit']
+    post = feat['logit']
     dyn = self._dist(sg(post)).kl(self._dist(prior))
     rep = self._dist(post).kl(self._dist(sg(prior)))
     if self.free_nats:
@@ -177,15 +192,242 @@ class RSSM(nj.Module):
       x = nn.act(self.act)(self.sub(f'prior{i}norm', nn.Norm, self.norm)(x))
     return self._logit('priorlogit', x)
 
-  def _logit(self, name, x):
+  def _logit(self, name, x, additional_to_oc=False):
     kw = dict(**self.kw, outscale=self.outscale)
-    x = self.sub(name, nn.Linear, self.stoch * self.classes, **kw)(x)
-    return x.reshape(x.shape[:-1] + (self.stoch, self.classes))
+    out_dim = self.stoch
+    if additional_to_oc:
+      out_dim = 2
+    x = self.sub(name, nn.Linear, out_dim*self.classes, **kw)(x)
+    return x.reshape(x.shape[:-1] + (out_dim, self.classes))
 
   def _dist(self, logits):
     out = embodied.jax.outs.OneHot(logits, self.unimix)
     out = embodied.jax.outs.Agg(out, 1, jnp.sum)
     return out
+
+class ElementwiseRSSM(nj.Module):
+
+  deter: int = 4096
+  hidden: int = 2048
+  stoch: int = 32
+  classes: int = 32
+  norm: str = 'rms'
+  act: str = 'gelu'
+  unroll: bool = False
+  unimix: float = 0.01
+  outscale: float = 1.0
+  imglayers: int = 2
+  obslayers: int = 1
+  dynlayers: int = 1
+  absolute: bool = False
+  blocks: int = 8
+  free_nats: float = 1.0
+  oc_tokens: int = 0 # defines how many tokens in front correspond to object-centric input. If None, no OC input.
+
+  attributes_per_object: int = 4
+  n_objects: int = 3
+  obj_type_mapping = lambda self, obj: str(obj)  # in pong: 0:ball, 1:player, 2:enemy
+  single_deter = deter // stoch
+
+  def __init__(self, act_space, **kw):
+    assert self.deter % self.blocks == 0
+    self.act_space = act_space
+    self.kw = kw
+
+  @property
+  def entry_space(self):
+    return dict(
+        deter=elements.Space(np.float32, self.deter),
+        stoch=elements.Space(np.float32, (self.stoch, self.classes)))
+
+  def initial(self, bsize):
+    carry = nn.cast(dict(
+        deter=jnp.zeros([bsize, self.deter], f32),
+        stoch=jnp.zeros([bsize, self.stoch, self.classes], f32)))
+    return carry
+
+  def truncate(self, entries, carry=None):
+    assert entries['deter'].ndim == 3, entries['deter'].shape
+    carry = jax.tree.map(lambda x: x[:, -1], entries)
+    return carry
+
+  def starts(self, entries, carry, nlast):
+    B = len(jax.tree.leaves(carry)[0])
+    return jax.tree.map(
+        lambda x: x[:, -nlast:].reshape((B * nlast, *x.shape[2:])), entries)
+
+  def observe(self, carry, tokens, action, reset, training, single=False):
+    carry, tokens, action = nn.cast((carry, tokens, action))
+    if single:
+      carry, (entry, feat) = self._observe(
+          carry, tokens, action, reset, training)
+      return carry, entry, feat
+    else:
+      unroll = jax.tree.leaves(tokens)[0].shape[1] if self.unroll else 1
+      carry, (entries, feat) = nj.scan(
+          lambda carry, inputs: self._observe(
+              carry, *inputs, training),
+          carry, (tokens, action, reset), unroll=unroll, axis=1)
+      return carry, entries, feat
+
+  def imagine(self, carry, policy, length, training, single=False):
+    if single:
+      action = policy(sg(carry)) if callable(policy) else policy
+      actemb = nn.DictConcat(self.act_space, 1)(action)
+      update = jnp.zeros_like(carry['deter'])
+      cand = jnp.zeros_like(carry['deter'])
+      for obj in range(self.n_objects):
+        # TODO: make sure that _core is choosing the correct subnet
+        # Since we want to use one subnet for each object-type!
+        #TODO: also pass all attributes of an object, not just one!
+        # deter_dim = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
+        obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
+        obj_type = self.obj_type_mapping(obj)
+        single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'][:, obj_attribute], actemb) #axis 2 is obj_attribute dim
+        # new_deter.at[:, obj_attribute].set(deter_dim) 
+        update.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_update)
+        cand.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_cand)
+      deter = update * cand + (1 - update) * carry['deter']
+      # deter = self._core(carry['deter'], carry['stoch'], actemb)
+      logit = self._prior(deter) 
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      carry = nn.cast(dict(deter=deter, stoch=stoch))
+      feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
+      assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
+      return carry, (feat, action)
+    else:
+      unroll = length if self.unroll else 1
+      if callable(policy):
+        carry, (feat, action) = nj.scan(
+            lambda c, _: self.imagine(c, policy, 1, training, single=True),
+            nn.cast(carry), (), length, unroll=unroll, axis=1)
+      else:
+        carry, (feat, action) = nj.scan(
+            lambda c, a: self.imagine(c, a, 1, training, single=True),
+            nn.cast(carry), nn.cast(policy), length, unroll=unroll, axis=1)
+      # We can also return all carry entries but it might be expensive.
+      # entries = dict(deter=feat['deter'], stoch=feat['stoch'])
+      # return carry, entries, feat, action
+      return carry, feat, action
+
+  def loss(self, carry, tokens, acts, reset, training):
+    metrics = {}
+    carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
+    prior = self._prior(feat['deter'])
+    post = feat['logit']
+    dyn = self._dist(sg(post)).kl(self._dist(prior))
+    rep = self._dist(post).kl(self._dist(sg(prior)))
+    if self.free_nats:
+      dyn = jnp.maximum(dyn, self.free_nats)
+      rep = jnp.maximum(rep, self.free_nats)
+    losses = {'dyn': dyn, 'rep': rep}
+    metrics['dyn_ent'] = self._dist(prior).entropy().mean()
+    metrics['rep_ent'] = self._dist(post).entropy().mean()
+    return carry, entries, losses, feat, metrics
+
+  def _prior(self, feat):
+    x = feat
+    for i in range(self.imglayers):
+      x = self.sub(f'prior{i}', nn.Linear, self.hidden, **self.kw)(x)
+      x = nn.act(self.act)(self.sub(f'prior{i}norm', nn.Norm, self.norm)(x))
+    return self._logit('priorlogit', x)
+
+  def _logit(self, name, x, additional_to_oc=False):
+    kw = dict(**self.kw, outscale=self.outscale)
+    out_dim = self.stoch
+    if additional_to_oc:
+      out_dim = 2
+    x = self.sub(name, nn.Linear, out_dim*self.classes, **kw)(x)
+    return x.reshape(x.shape[:-1] + (out_dim, self.classes))
+
+  def _dist(self, logits):
+    out = embodied.jax.outs.OneHot(logits, self.unimix)
+    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
+    return out
+
+  def _observe(self, carry, tokens, action, reset, training):
+    deter, stoch, action = nn.mask(
+        (carry['deter'], carry['stoch'], action), ~reset)
+    action = nn.DictConcat(self.act_space, 1)(action)
+    action = nn.mask(action, ~reset)
+
+    # new_deter = jnp.zeros_like(deter)
+    update = jnp.zeros_like(deter)
+    cand = jnp.zeros_like(deter)
+    for obj in range(self.n_objects):
+      # Since we want to use one subnet for each object-type!
+      obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
+      obj_type = self.obj_type_mapping(obj)
+      single_update, single_cand = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
+      # new_deter.at[:, obj_attribute].set(deter_dim) 
+      update.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_update)
+      cand.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_cand)
+
+    #TODO: Test if this works (and adjust oc_tokens in config accordingly)
+    # compute update/cand for remaining deter dimensions (if any) -> this would be the non-oc dims 
+    if obj*self.single_deter + self.single_deter < self.deter:
+      remaining_deter = deter[:, obj*self.single_deter + self.single_deter:]
+      remaining_stoch = stoch[:, obj*self.single_deter//self.attributes_per_object + self.attributes_per_object:]
+      single_update, single_cand = self._core('remaining', remaining_deter, remaining_stoch, action)
+      update.at[:, obj*self.single_deter + self.single_deter:].set(single_update)
+      cand.at[:, obj*self.single_deter + self.single_deter:].set(single_cand)
+    deter = update * cand + (1 - update) * deter
+
+    if self.oc_tokens != 0:
+      # additionally use object-centric input as posterior 
+      oc = tokens[..., :self.oc_tokens]
+      oc_logit = nn.cast(jax.nn.one_hot(oc, self.classes, axis=-1)) # shape (..., oc_tokens, classes), pong: (1, 14, 256)
+      img_tokens = tokens[..., self.oc_tokens:].reshape((*deter.shape[:-1], -1))
+      x = img_tokens if self.absolute else jnp.concatenate([deter, img_tokens], -1)
+      for i in range(self.obslayers):
+        x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      img_logit = self._logit('obslogit', x, additional_to_oc=True) #shape (..., n_img_dim, classes), pong: (1, 2, 256)
+      logit = jnp.concatenate([oc_logit, img_logit], axis=-2) # concat along object/attribute dim, not n_values
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+
+    else:
+      tokens = tokens.reshape((*deter.shape[:-1], -1))
+      x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
+      for i in range(self.obslayers):
+        x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      logit = self._logit('obslogit', x)
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+    carry = dict(deter=deter, stoch=stoch)
+    feat = dict(deter=deter, stoch=stoch, logit=logit)
+    entry = dict(deter=deter, stoch=stoch)
+    assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
+    return carry, (entry, feat)
+
+  def _core(self, obj_type, deter, stoch, action):
+    stoch = stoch.reshape((stoch.shape[0], -1))
+    action /= sg(jnp.maximum(1, jnp.abs(action)))
+    g = self.blocks
+    flat2group = lambda x: einops.rearrange(x, '... (g h) -> ... g h', g=g)
+    group2flat = lambda x: einops.rearrange(x, '... g h -> ... (g h)', g=g)
+    x0 = self.sub(f'dynin0{obj_type}', nn.Linear, self.hidden, **self.kw)(deter)
+    x0 = nn.act(self.act)(self.sub(f'dynin0norm{obj_type}', nn.Norm, self.norm)(x0))
+    x1 = self.sub(f'dynin1{obj_type}', nn.Linear, self.hidden, **self.kw)(stoch)
+    x1 = nn.act(self.act)(self.sub(f'dynin1norm{obj_type}', nn.Norm, self.norm)(x1))
+    x2 = self.sub(f'dynin2{obj_type}', nn.Linear, self.hidden, **self.kw)(action)
+    x2 = nn.act(self.act)(self.sub(f'dynin2norm{obj_type}', nn.Norm, self.norm)(x2))
+    x = jnp.concatenate([x0, x1, x2], -1)[..., None, :].repeat(g, -2)
+    x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
+    for i in range(self.dynlayers):
+      # x = self.sub(f'dynhid{i}{obj_type}', nn.BlockLinear, self.deter, g, **self.kw)(x)
+      x = self.sub(f'dynhid{i}{obj_type}', nn.BlockLinear, self.single_deter, g, **self.kw)(x)
+      x = nn.act(self.act)(self.sub(f'dynhid{i}norm{obj_type}', nn.Norm, self.norm)(x))
+    # x = self.sub(f'dyngru{obj_type}', nn.BlockLinear, 3 * self.deter, g, **self.kw)(x)
+    x = self.sub(f'dyngru{obj_type}', nn.BlockLinear, 3 * self.single_deter, g, **self.kw)(x)
+    gates = jnp.split(flat2group(x), 3, -1)
+    reset, cand, update = [group2flat(x) for x in gates]
+    reset = jax.nn.sigmoid(reset)
+    cand = jnp.tanh(reset * cand)
+    update = jax.nn.sigmoid(update - 1)
+    # deter = update * cand + (1 - update) * deter
+    return update, cand
+
 
 class DummyEncoder:#(nj.Module):
   """
@@ -314,6 +556,8 @@ class Decoder(nj.Module):
     assert all(len(s.shape) <= 3 for s in obs_space.values()), obs_space
     self.obs_space = obs_space
     self.veckeys = [k for k, s in obs_space.items() if len(s.shape) <= 2]
+    if "oc" in self.veckeys:
+      self.veckeys.remove("oc") 
     self.imgkeys = [k for k, s in obs_space.items() if len(s.shape) == 3]
     self.depths = tuple(self.depth * mult for mult in self.mults)
     self.imgdep = sum(obs_space[k].shape[-1] for k in self.imgkeys)

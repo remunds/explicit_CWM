@@ -36,14 +36,16 @@ class Agent(embodied.jax.Agent):
     self.config = config
 
     exclude = ('is_first', 'is_last', 'is_terminal', 'reward')
+    exclude_dec = exclude + ('oc',)  # do not reconstruct oc
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
-    dec_space = {k: v for k, v in obs_space.items() if k not in exclude}
+    dec_space = {k: v for k, v in obs_space.items() if k not in exclude_dec}
     self.enc = {
         'simple': rssm.Encoder,
         'dummy': rssm.DummyEncoder,
     }[config.enc.typ](enc_space, **config.enc[config.enc.typ], name='enc')
     self.dyn = {
         'rssm': rssm.RSSM,
+        'rssm_elementwise': rssm.ElementwiseRSSM,
     }[config.dyn.typ](act_space, **config.dyn[config.dyn.typ], name='dyn')
     self.dec = {
         'simple': rssm.Decoder,
@@ -273,7 +275,6 @@ class Agent(embodied.jax.Agent):
       return carry, {}
 
     carry, obs, prevact, _ = self._apply_replay_context(carry, data)
-    #TODO: log/img is not part of obs keys here :( -> find way to include it, s.t. we can log it.
     (enc_carry, dyn_carry, dec_carry) = carry
     B, T = obs['is_first'].shape
     RB = min(6, B)

@@ -50,7 +50,7 @@ class JAXAtari(embodied.Env):
       # add object-centric observation space
       _img, _obj = _space
       obj_shape = list(_obj.shape[1:])
-      obj_shape[-1] -= 2  # remove last 2 attributes (player/enemy scores) in pong
+      # obj_shape[-1] -= 2  # remove last 2 attributes (player/enemy scores) in pong
       obj_shape = tuple(obj_shape)
       obs_dict['oc'] = elements.Space(np.int32, obj_shape, low=0, high=255)
     return obs_dict
@@ -107,11 +107,13 @@ class JAXAtari(embodied.Env):
     )
     if self.obs_mode == "oc":
       img, obj = obs
-      obs_out['oc'] = obj[..., :-2].astype(np.int32) #removing last 2 attributes (player/enemy scores) in pong
+      # obs_out['oc'] = obj[..., :-2].astype(np.int32) #removing last 2 attributes (player/enemy scores) in pong
+      obs_out['oc'] = obj.astype(np.int32)
       obs_out['log/image'] = img.astype(np.uint8)
     elif self.obs_mode == "both":
       img, obj = obs
-      obs_out['oc'] = obj[..., :-2].astype(np.int32) #removing last 2 attributes (player/enemy scores) in pong
+      # obs_out['oc'] = obj[..., :-2].astype(np.int32) #removing last 2 attributes (player/enemy scores) in pong
+      obs_out['oc'] = obj.astype(np.int32)
       obs_out['image'] = img.astype(np.uint8)
     else:
       obs_out['image'] = obs.astype(np.uint8)
