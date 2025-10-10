@@ -10,11 +10,11 @@ uv pip install -r dreamerv3/requirements.txt
 ```
 3. 
 ```bash
-uv pip install git+https://github.com/k4ntz/JAXAtari@fdc97d1ff3abd73f8533f08d2b6dc1def7a79b60
+uv pip install git+https://github.com/k4ntz/JAXAtari@c3ff715754f8153a19317fa3a99cabceded3b9cb
 ```
 4. 
 ```bash
-uv pip install -U jax==0.4.38 wandb[media]
+uv pip install -U jax==0.4.38 wandb[media] rtpt
 ```
 5. 
 ```bash

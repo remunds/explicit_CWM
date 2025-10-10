@@ -185,16 +185,12 @@ jaxatari:
     # .*\.rssm: {stoch: 16, classes: 256, oc_tokens: 14} #stoch - oc_tokens == num_attributes per image
     dyn: #alternatively use rssm (from above)
       typ: rssm_elementwise
-      # Make sure, that this is true:
-      # oc_tokens = n_objects * attributes_per_object
-      # stoch = oc_tokens + img_tokens (additional dims)
-      # classes = possible values
-      # obj_type_mapping: will be used to determine which obj_num is what obj_type
-      #   For pong: 0, 1, 2 (enemy, player, ball)
-      # single_deter: the hidden_size of each RSSM output (corresponding to a single object)
-      #   Make sure that this can be divided by deter
-      # e.g., I do in code single_deter = deter // stoch (8096//16=512)
-      rssm_elementwise: {stoch: 16, classes: 256, oc_tokens: 14, attributes_per_object: 4, n_objects: 3} #, obj_type_mapping: 0, single_deter: 0}
+      # Make sure to fill-up the n_objects, s.t. they are of equal size (attributes_per_object).
+      # Meaning that n_objects * attributes_per_object == stoch
+      # For example, in pong we have: player, enemy, ball, rest.
+      # Where rest contains (score_p, score_e, img_tok1, img_tok2)
+      # So a total of 4 objects with 4 attributes: stoch = 16
+      rssm_elementwise: {stoch: 32, classes: 256, oc_tokens: 14, attributes_per_object: 4, n_objects: 8}
     enc:
       typ: simple # dummy: only oc input, simple: both, passthrough oc possible 
       simple: {oc_passthrough: True} #Do not encode object-centric input.

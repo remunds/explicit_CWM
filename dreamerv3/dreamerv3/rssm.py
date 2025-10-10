@@ -78,18 +78,7 @@ class RSSM(nj.Module):
         (carry['deter'], carry['stoch'], action), ~reset)
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
-
-    if self.single_oc:
-      new_deter = jnp.zeros_like(deter)
-      for obj_attribute in range(self.stoch):
-        # TODO: make sure that _core is choosing the correct subnet
-        # Since we want to use one subnet for each object-type!
-        #TODO: also pass all attributes of an object, not just one!
-        deter_dim = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
-        new_deter.at[:, obj_attribute].set(deter_dim) 
-      deter = new_deter
-    else:
-      deter = self._core(deter, stoch, action)
+    deter = self._core(deter, stoch, action)
 
     if self.oc_tokens != 0:
       # additionally use object-centric input as posterior 
@@ -227,12 +216,15 @@ class ElementwiseRSSM(nj.Module):
   attributes_per_object: int = 4
   n_objects: int = 3
   obj_type_mapping = lambda self, obj: str(obj)  # in pong: 0:ball, 1:player, 2:enemy
-  single_deter = deter // stoch
 
   def __init__(self, act_space, **kw):
     assert self.deter % self.blocks == 0
+    assert self.n_objects * self.attributes_per_object == self.stoch, "Number of objects times attributes per object must equal stoch dimension"
     self.act_space = act_space
     self.kw = kw
+    self.obj_deter = self.deter // self.n_objects 
+    assert self.obj_deter * self.n_objects == self.deter, "deter must be perfectly divisible by n_objects currently"
+    # TODO: What if deter is not perfectly divisible by n_objects?
 
   @property
   def entry_space(self):
@@ -276,19 +268,33 @@ class ElementwiseRSSM(nj.Module):
       actemb = nn.DictConcat(self.act_space, 1)(action)
       update = jnp.zeros_like(carry['deter'])
       cand = jnp.zeros_like(carry['deter'])
+
+      # obj_multiplier = self.single_deter * self.attributes_per_object
+      # for obj in range(self.n_objects):
+      #   obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
+      #   obj_type = self.obj_type_mapping(obj)
+      #   single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'][:, obj_attribute], actemb) #axis 2 is obj_attribute dim
+      #   update.at[:, obj*obj_multiplier:obj*obj_multiplier + obj_multiplier].set(single_update)
+      #   cand.at[:, obj*obj_multiplier:obj*obj_multiplier + obj_multiplier].set(single_cand)
       for obj in range(self.n_objects):
-        # TODO: make sure that _core is choosing the correct subnet
-        # Since we want to use one subnet for each object-type!
-        #TODO: also pass all attributes of an object, not just one!
-        # deter_dim = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
+        # select the all attributes for this object from stoch
+        # obj0: 0-3, obj1: 4-7, obj2: 8-11, obj3 == rest: 12-15
         obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
         obj_type = self.obj_type_mapping(obj)
-        single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'][:, obj_attribute], actemb) #axis 2 is obj_attribute dim
-        # new_deter.at[:, obj_attribute].set(deter_dim) 
-        update.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_update)
-        cand.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_cand)
+        # single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'][:, obj_attribute], actemb) #axis 2 is obj_attribute dim
+        single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'], actemb) #axis 2 is obj_attribute dim
+        update.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_update)
+        cand.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_cand)
+
+      # obj = self.n_objects
+      # if obj*obj_multiplier < self.deter:
+      #   remaining_stoch = carry['stoch'][:, obj*self.attributes_per_object:]
+      #   # Need access to full deter, since the stoch part may be dependent on some other object attribute
+      #   single_update, single_cand = self._core('remaining', carry['deter'], remaining_stoch, actemb)
+      #   update.at[:, obj*obj_multiplier:].set(single_update)
+      #   cand.at[:, obj*obj_multiplier:].set(single_cand)
       deter = update * cand + (1 - update) * carry['deter']
-      # deter = self._core(carry['deter'], carry['stoch'], actemb)
+
       logit = self._prior(deter) 
       stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
       carry = nn.cast(dict(deter=deter, stoch=stoch))
@@ -336,7 +342,7 @@ class ElementwiseRSSM(nj.Module):
     kw = dict(**self.kw, outscale=self.outscale)
     out_dim = self.stoch
     if additional_to_oc:
-      out_dim = 2
+      out_dim = self.stoch - self.oc_tokens
     x = self.sub(name, nn.Linear, out_dim*self.classes, **kw)(x)
     return x.reshape(x.shape[:-1] + (out_dim, self.classes))
 
@@ -351,26 +357,34 @@ class ElementwiseRSSM(nj.Module):
     action = nn.DictConcat(self.act_space, 1)(action)
     action = nn.mask(action, ~reset)
 
-    # new_deter = jnp.zeros_like(deter)
     update = jnp.zeros_like(deter)
     cand = jnp.zeros_like(deter)
+
     for obj in range(self.n_objects):
-      # Since we want to use one subnet for each object-type!
+      # select the all attributes for this object from stoch
+      # obj0: 0-3, obj1: 4-7, obj2: 8-11, obj3 == rest: 12-15
       obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
       obj_type = self.obj_type_mapping(obj)
-      single_update, single_cand = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
-      # new_deter.at[:, obj_attribute].set(deter_dim) 
-      update.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_update)
-      cand.at[:, obj*self.single_deter:obj*self.single_deter + self.single_deter].set(single_cand)
+      # TODO: Does providing full stoch solve the problem?
+      # Maybe the problem is that for next_deter, we need full stoch.
+      # What if this is true? How to ensure that each object only uses its own stoch?
+      # Or at least just additionally the other objects' values?
+      # Maybe we need dx and dy?
+      # single_update, single_cand = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
+      single_update, single_cand = self._core(obj_type, deter, stoch, action) #axis 2 is obj_attribute dim
+      update.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_update)
+      cand.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_cand)
+      print(f"obj: {obj}, stoch_slice: {obj_attribute}, deter_slice: {slice(obj*self.obj_deter, obj*self.obj_deter + self.obj_deter)}")
 
-    #TODO: Test if this works (and adjust oc_tokens in config accordingly)
-    # compute update/cand for remaining deter dimensions (if any) -> this would be the non-oc dims 
-    if obj*self.single_deter + self.single_deter < self.deter:
-      remaining_deter = deter[:, obj*self.single_deter + self.single_deter:]
-      remaining_stoch = stoch[:, obj*self.single_deter//self.attributes_per_object + self.attributes_per_object:]
-      single_update, single_cand = self._core('remaining', remaining_deter, remaining_stoch, action)
-      update.at[:, obj*self.single_deter + self.single_deter:].set(single_update)
-      cand.at[:, obj*self.single_deter + self.single_deter:].set(single_cand)
+    # # compute update/cand for remaining deter dimensions (if any) -> this would be the non-oc dims 
+    # obj = self.n_objects
+    # if obj*obj_multiplier < self.deter:
+    #   remaining_stoch = stoch[:, obj*self.attributes_per_object:]
+    #   # Need access to full deter, since the stoch part may be dependent on some other object attribute
+    #   single_update, single_cand = self._core('remaining', deter, remaining_stoch, action)
+    #   update.at[:, obj*obj_multiplier:].set(single_update)
+    #   cand.at[:, obj*obj_multiplier:].set(single_cand)
+
     deter = update * cand + (1 - update) * deter
 
     if self.oc_tokens != 0:
@@ -416,10 +430,10 @@ class ElementwiseRSSM(nj.Module):
     x = group2flat(jnp.concatenate([flat2group(deter), x], -1))
     for i in range(self.dynlayers):
       # x = self.sub(f'dynhid{i}{obj_type}', nn.BlockLinear, self.deter, g, **self.kw)(x)
-      x = self.sub(f'dynhid{i}{obj_type}', nn.BlockLinear, self.single_deter, g, **self.kw)(x)
+      x = self.sub(f'dynhid{i}{obj_type}', nn.BlockLinear, self.obj_deter, g, **self.kw)(x)
       x = nn.act(self.act)(self.sub(f'dynhid{i}norm{obj_type}', nn.Norm, self.norm)(x))
     # x = self.sub(f'dyngru{obj_type}', nn.BlockLinear, 3 * self.deter, g, **self.kw)(x)
-    x = self.sub(f'dyngru{obj_type}', nn.BlockLinear, 3 * self.single_deter, g, **self.kw)(x)
+    x = self.sub(f'dyngru{obj_type}', nn.BlockLinear, 3 * self.obj_deter, g, **self.kw)(x)
     gates = jnp.split(flat2group(x), 3, -1)
     reset, cand, update = [group2flat(x) for x in gates]
     reset = jax.nn.sigmoid(reset)
