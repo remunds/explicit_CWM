@@ -92,6 +92,7 @@ defaults:
     dyn:
       typ: rssm
       rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, oc_tokens: 0}
+      delta_rssm: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, oc_tokens: 0}
       rssm_elementwise: {deter: 8192, hidden: 1024, stoch: 32, classes: 64, act: silu, norm: rms, unimix: 0.01, outscale: 1.0, winit: trunc_normal_in, imglayers: 2, obslayers: 1, dynlayers: 1, absolute: False, blocks: 8, free_nats: 1.0, oc_tokens: 0, attributes_per_object: 4, n_objects: 3} #, obj_type: 0, single_deter: 0}
     enc:
       typ: simple
@@ -170,6 +171,7 @@ atari:
 
 jaxatari:
   # <<: *size1m # for oc
+  <<: *size12m # for oc
   task: jaxatari_pong
   # Note that GPU and vectorized runs only make sense with a high number of envs,
   # since each step is done isolated and is NOT vectorized :
@@ -182,15 +184,18 @@ jaxatari:
   # e.g. pong has (x,y,w,h of ball, player, enemy + score_player, score_enemy) == 14
   # removing score_player, score_enemy: 3*4=12
   # map num_entities to stoch, num_attributes to classes
-    # .*\.rssm: {stoch: 16, classes: 256, oc_tokens: 14} #stoch - oc_tokens == num_attributes per image
+    # .*\.rssm: {stoch: 32, classes: 32, oc_tokens: 28} #stoch - oc_tokens == num_attributes per image
+    # .*\.rssm: {stoch: 28, classes: 1, oc_tokens: 28} #stoch - oc_tokens == num_attributes per image
     dyn: #alternatively use rssm (from above)
+      # typ: deta_rssm
       typ: rssm_elementwise
       # Make sure to fill-up the n_objects, s.t. they are of equal size (attributes_per_object).
       # Meaning that n_objects * attributes_per_object == stoch
       # For example, in pong we have: player, enemy, ball, rest.
       # Where rest contains (score_p, score_e, img_tok1, img_tok2)
       # So a total of 4 objects with 4 attributes: stoch = 16
-      rssm_elementwise: {stoch: 32, classes: 256, oc_tokens: 14, attributes_per_object: 4, n_objects: 8}
+      rssm_elementwise: {stoch: 32, classes: 1, oc_tokens: 28, attributes_per_object: 8, n_objects: 4}
+      # delta_rssm: {stoch: 14, classes: 1, oc_tokens: 28} #stoch - oc_tokens == num_attributes per image
     enc:
       typ: simple # dummy: only oc input, simple: both, passthrough oc possible 
       simple: {oc_passthrough: True} #Do not encode object-centric input.

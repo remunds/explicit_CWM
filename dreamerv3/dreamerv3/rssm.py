@@ -83,15 +83,19 @@ class RSSM(nj.Module):
     if self.oc_tokens != 0:
       # additionally use object-centric input as posterior 
       oc = tokens[..., :self.oc_tokens]
-      oc_logit = nn.cast(jax.nn.one_hot(oc, self.classes, axis=-1)) # shape (..., oc_tokens, classes), pong: (1, 14, 256)
-      img_tokens = tokens[..., self.oc_tokens:].reshape((*deter.shape[:-1], -1))
-      x = img_tokens if self.absolute else jnp.concatenate([deter, img_tokens], -1)
-      for i in range(self.obslayers):
-        x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
-        x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
-      img_logit = self._logit('obslogit', x, additional_to_oc=True) #shape (..., n_img_dim, classes), pong: (1, 2, 256)
-      logit = jnp.concatenate([oc_logit, img_logit], axis=-2) # concat along object/attribute dim, not n_values
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      # oc_logit = nn.cast(jax.nn.one_hot(oc, self.classes, axis=-1)) # shape (..., oc_tokens, classes), pong: (1, 14, 256)
+      # img_tokens = tokens[..., self.oc_tokens:].reshape((*deter.shape[:-1], -1))
+      # x = img_tokens if self.absolute else jnp.concatenate([deter, img_tokens], -1)
+      # for i in range(self.obslayers):
+      #   x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+      #   x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      # img_logit = self._logit('obslogit', x, additional_to_oc=True) #shape (..., n_img_dim, classes), pong: (1, 2, 256)
+      # logit = jnp.concatenate([oc_logit, img_logit], axis=-2) # concat along object/attribute dim, not n_values
+      # stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+
+      std_dev = jnp.ones_like(oc) * 0.01
+      logit = jnp.concat([oc, std_dev], axis=-1)
+      stoch = nn.cast(self._norm_dist(logit).sample(seed=nj.seed()))
 
     else:
       tokens = tokens.reshape((*deter.shape[:-1], -1))
@@ -101,6 +105,10 @@ class RSSM(nj.Module):
         x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
       logit = self._logit('obslogit', x)
       stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+
+    # add classes dim back 
+    stoch = jnp.expand_dims(stoch, axis=-1)
+
     carry = dict(deter=deter, stoch=stoch)
     feat = dict(deter=deter, stoch=stoch, logit=logit)
     entry = dict(deter=deter, stoch=stoch)
@@ -113,7 +121,9 @@ class RSSM(nj.Module):
       actemb = nn.DictConcat(self.act_space, 1)(action)
       deter = self._core(carry['deter'], carry['stoch'], actemb)
       logit = self._prior(deter) 
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      stoch = nn.cast(self._norm_dist(logit).sample(seed=nj.seed()))
+      # add classes dim back
+      stoch = jnp.expand_dims(stoch, axis=-1)
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
@@ -128,6 +138,7 @@ class RSSM(nj.Module):
         carry, (feat, action) = nj.scan(
             lambda c, a: self.imagine(c, a, 1, training, single=True),
             nn.cast(carry), nn.cast(policy), length, unroll=unroll, axis=1)
+
       # We can also return all carry entries but it might be expensive.
       # entries = dict(deter=feat['deter'], stoch=feat['stoch'])
       # return carry, entries, feat, action
@@ -138,14 +149,14 @@ class RSSM(nj.Module):
     carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
     prior = self._prior(feat['deter'])
     post = feat['logit']
-    dyn = self._dist(sg(post)).kl(self._dist(prior))
-    rep = self._dist(post).kl(self._dist(sg(prior)))
+    dyn = self._norm_dist(sg(post)).kl(self._norm_dist(prior))
+    rep = self._norm_dist(post).kl(self._norm_dist(sg(prior)))
     if self.free_nats:
       dyn = jnp.maximum(dyn, self.free_nats)
       rep = jnp.maximum(rep, self.free_nats)
     losses = {'dyn': dyn, 'rep': rep}
-    metrics['dyn_ent'] = self._dist(prior).entropy().mean()
-    metrics['rep_ent'] = self._dist(post).entropy().mean()
+    metrics['dyn_ent'] = self._norm_dist(prior).entropy().mean()
+    metrics['rep_ent'] = self._norm_dist(post).entropy().mean()
     return carry, entries, losses, feat, metrics
 
   def _core(self, deter, stoch, action):
@@ -184,18 +195,31 @@ class RSSM(nj.Module):
   def _logit(self, name, x, additional_to_oc=False):
     kw = dict(**self.kw, outscale=self.outscale)
     out_dim = self.stoch
-    if additional_to_oc:
-      out_dim = 2
-    x = self.sub(name, nn.Linear, out_dim*self.classes, **kw)(x)
-    return x.reshape(x.shape[:-1] + (out_dim, self.classes))
+    # if additional_to_oc:
+    #   out_dim = self.stoch - self.oc_tokens
+    # x = self.sub(name, nn.Linear, out_dim*self.classes, **kw)(x)
+    # return x.reshape(x.shape[:-1] + (out_dim, self.classes))
+    x = self.sub(name, nn.Linear, out_dim*2, **kw)(x)
+    return x.reshape(x.shape[:-1] + (out_dim*2,))
 
   def _dist(self, logits):
     out = embodied.jax.outs.OneHot(logits, self.unimix)
     out = embodied.jax.outs.Agg(out, 1, jnp.sum)
     return out
 
-class ElementwiseRSSM(nj.Module):
+  def _norm_dist(self, logit):
+    assert self.oc_tokens == self.stoch
+    mean = logit[..., :self.oc_tokens]
+    std_dev = logit[..., self.oc_tokens:]
+    std_dev = jax.nn.softplus(std_dev) + 1e-4  # ensure stddev is positive and not too close to zero
+    # if std_dev.shape[-1] == 0:
+    #   std_dev = jnp.ones_like(mean) * 0.1
+    assert mean.shape == std_dev.shape
+    out = embodied.jax.outs.Normal(mean, stddev=std_dev)
+    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
+    return out
 
+class ElementwiseRSSM(nj.Module):
   deter: int = 4096
   hidden: int = 2048
   stoch: int = 32
@@ -212,7 +236,6 @@ class ElementwiseRSSM(nj.Module):
   blocks: int = 8
   free_nats: float = 1.0
   oc_tokens: int = 0 # defines how many tokens in front correspond to object-centric input. If None, no OC input.
-
   attributes_per_object: int = 4
   n_objects: int = 3
   obj_type_mapping = lambda self, obj: str(obj)  # in pong: 0:ball, 1:player, 2:enemy
@@ -225,7 +248,7 @@ class ElementwiseRSSM(nj.Module):
     self.obj_deter = self.deter // self.n_objects 
     assert self.obj_deter * self.n_objects == self.deter, "deter must be perfectly divisible by n_objects currently"
     # TODO: What if deter is not perfectly divisible by n_objects?
-
+  
   @property
   def entry_space(self):
     return dict(
@@ -268,35 +291,30 @@ class ElementwiseRSSM(nj.Module):
       actemb = nn.DictConcat(self.act_space, 1)(action)
       update = jnp.zeros_like(carry['deter'])
       cand = jnp.zeros_like(carry['deter'])
-
-      # obj_multiplier = self.single_deter * self.attributes_per_object
-      # for obj in range(self.n_objects):
-      #   obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
-      #   obj_type = self.obj_type_mapping(obj)
-      #   single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'][:, obj_attribute], actemb) #axis 2 is obj_attribute dim
-      #   update.at[:, obj*obj_multiplier:obj*obj_multiplier + obj_multiplier].set(single_update)
-      #   cand.at[:, obj*obj_multiplier:obj*obj_multiplier + obj_multiplier].set(single_cand)
       for obj in range(self.n_objects):
-        # select the all attributes for this object from stoch
+        # select all attributes for this object from stoch
         # obj0: 0-3, obj1: 4-7, obj2: 8-11, obj3 == rest: 12-15
-        obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
+        # obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
+        obj_deter_attribute = slice(obj * self.obj_deter, (obj + 1) * self.obj_deter)
         obj_type = self.obj_type_mapping(obj)
         # single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'][:, obj_attribute], actemb) #axis 2 is obj_attribute dim
+        # Testing if full stoch works better than only own obj attributes
+        # single_update, single_cand = self._core(obj_type, carry['deter'][:, obj_deter_attribute], carry['stoch'], actemb) #axis 2 is obj_attribute dim
+        #TODO: Currently testing whether full access to deter and carry works.
         single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'], actemb) #axis 2 is obj_attribute dim
-        update.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_update)
-        cand.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_cand)
+        start_indices = (0, obj * self.obj_deter)
+        # update = jax.lax.dynamic_update_slice(update, single_update, start_indices)
+        update = update.at[:, obj_deter_attribute].set(single_update)
+        # cand = jax.lax.dynamic_update_slice(cand, single_cand, start_indices)
+        cand = cand.at[:, obj_deter_attribute].set(single_cand)
 
-      # obj = self.n_objects
-      # if obj*obj_multiplier < self.deter:
-      #   remaining_stoch = carry['stoch'][:, obj*self.attributes_per_object:]
-      #   # Need access to full deter, since the stoch part may be dependent on some other object attribute
-      #   single_update, single_cand = self._core('remaining', carry['deter'], remaining_stoch, actemb)
-      #   update.at[:, obj*obj_multiplier:].set(single_update)
-      #   cand.at[:, obj*obj_multiplier:].set(single_cand)
+      # TODO: Should we handle non-padded inputs?
+
       deter = update * cand + (1 - update) * carry['deter']
 
-      logit = self._prior(deter) 
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      logit = self._prior(deter)
+      stoch = nn.cast(self._norm_dist(logit).sample(seed=nj.seed()))
+      stoch = jnp.expand_dims(stoch, axis=-1) # add classes dim back
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
@@ -316,41 +334,6 @@ class ElementwiseRSSM(nj.Module):
       # return carry, entries, feat, action
       return carry, feat, action
 
-  def loss(self, carry, tokens, acts, reset, training):
-    metrics = {}
-    carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
-    prior = self._prior(feat['deter'])
-    post = feat['logit']
-    dyn = self._dist(sg(post)).kl(self._dist(prior))
-    rep = self._dist(post).kl(self._dist(sg(prior)))
-    if self.free_nats:
-      dyn = jnp.maximum(dyn, self.free_nats)
-      rep = jnp.maximum(rep, self.free_nats)
-    losses = {'dyn': dyn, 'rep': rep}
-    metrics['dyn_ent'] = self._dist(prior).entropy().mean()
-    metrics['rep_ent'] = self._dist(post).entropy().mean()
-    return carry, entries, losses, feat, metrics
-
-  def _prior(self, feat):
-    x = feat
-    for i in range(self.imglayers):
-      x = self.sub(f'prior{i}', nn.Linear, self.hidden, **self.kw)(x)
-      x = nn.act(self.act)(self.sub(f'prior{i}norm', nn.Norm, self.norm)(x))
-    return self._logit('priorlogit', x)
-
-  def _logit(self, name, x, additional_to_oc=False):
-    kw = dict(**self.kw, outscale=self.outscale)
-    out_dim = self.stoch
-    if additional_to_oc:
-      out_dim = self.stoch - self.oc_tokens
-    x = self.sub(name, nn.Linear, out_dim*self.classes, **kw)(x)
-    return x.reshape(x.shape[:-1] + (out_dim, self.classes))
-
-  def _dist(self, logits):
-    out = embodied.jax.outs.OneHot(logits, self.unimix)
-    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
-    return out
-
   def _observe(self, carry, tokens, action, reset, training):
     deter, stoch, action = nn.mask(
         (carry['deter'], carry['stoch'], action), ~reset)
@@ -361,44 +344,42 @@ class ElementwiseRSSM(nj.Module):
     cand = jnp.zeros_like(deter)
 
     for obj in range(self.n_objects):
-      # select the all attributes for this object from stoch
+      # select all attributes for this object from stoch
       # obj0: 0-3, obj1: 4-7, obj2: 8-11, obj3 == rest: 12-15
-      obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
+      # obj_attribute = slice(obj * self.attributes_per_object, (obj + 1) * self.attributes_per_object)
+      obj_deter_attribute = slice(obj * self.obj_deter, (obj + 1) * self.obj_deter)
       obj_type = self.obj_type_mapping(obj)
-      # TODO: Does providing full stoch solve the problem?
-      # Maybe the problem is that for next_deter, we need full stoch.
-      # What if this is true? How to ensure that each object only uses its own stoch?
-      # Or at least just additionally the other objects' values?
-      # Maybe we need dx and dy?
-      # single_update, single_cand = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
+      # print("observe: ", deter[:, obj_deter_attribute])
+      # single_update, single_cand = self._core(obj_type, deter[:, obj_deter_attribute], stoch, action) #axis 2 is obj_attribute dim
+      #TODO: Currently testing whether full access to deter and stoch works.
+      # Did a big mistake and not updating the variables before!
+      # So if current run works -> Test again with reduced deter / stoch.
       single_update, single_cand = self._core(obj_type, deter, stoch, action) #axis 2 is obj_attribute dim
-      update.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_update)
-      cand.at[:, obj*self.obj_deter:obj*self.obj_deter + self.obj_deter].set(single_cand)
-      print(f"obj: {obj}, stoch_slice: {obj_attribute}, deter_slice: {slice(obj*self.obj_deter, obj*self.obj_deter + self.obj_deter)}")
+      update = update.at[:, obj_deter_attribute].set(single_update)
+      # start_indices = (0, obj * self.obj_deter)
+      # update = jax.lax.dynamic_update_slice(update, single_update, start_indices)
+      cand = cand.at[:, obj_deter_attribute].set(single_cand)
+      # cand = jax.lax.dynamic_update_slice(cand, single_cand, start_indices) 
 
-    # # compute update/cand for remaining deter dimensions (if any) -> this would be the non-oc dims 
-    # obj = self.n_objects
-    # if obj*obj_multiplier < self.deter:
-    #   remaining_stoch = stoch[:, obj*self.attributes_per_object:]
-    #   # Need access to full deter, since the stoch part may be dependent on some other object attribute
-    #   single_update, single_cand = self._core('remaining', deter, remaining_stoch, action)
-    #   update.at[:, obj*obj_multiplier:].set(single_update)
-    #   cand.at[:, obj*obj_multiplier:].set(single_cand)
+    # TODO: Should we handle non-padded inputs?
 
     deter = update * cand + (1 - update) * deter
 
     if self.oc_tokens != 0:
       # additionally use object-centric input as posterior 
       oc = tokens[..., :self.oc_tokens]
-      oc_logit = nn.cast(jax.nn.one_hot(oc, self.classes, axis=-1)) # shape (..., oc_tokens, classes), pong: (1, 14, 256)
-      img_tokens = tokens[..., self.oc_tokens:].reshape((*deter.shape[:-1], -1))
-      x = img_tokens if self.absolute else jnp.concatenate([deter, img_tokens], -1)
-      for i in range(self.obslayers):
-        x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
-        x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
-      img_logit = self._logit('obslogit', x, additional_to_oc=True) #shape (..., n_img_dim, classes), pong: (1, 2, 256)
-      logit = jnp.concatenate([oc_logit, img_logit], axis=-2) # concat along object/attribute dim, not n_values
-      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      # oc_logit = nn.cast(jax.nn.one_hot(oc, self.classes, axis=-1)) # shape (..., oc_tokens, classes), pong: (1, 14, 256)
+      # img_tokens = tokens[..., self.oc_tokens:].reshape((*deter.shape[:-1], -1))
+      # x = img_tokens if self.absolute else jnp.concatenate([deter, img_tokens], -1)
+      # for i in range(self.obslayers):
+      #   x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+      #   x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      # img_logit = self._logit('obslogit', x, additional_to_oc=True) #shape (..., n_img_dim, classes), pong: (1, 2, 256)
+      # logit = jnp.concatenate([oc_logit, img_logit], axis=-2) # concat along object/attribute dim, not n_values
+      # stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      std_dev = jnp.ones_like(oc) * 0.01
+      logit = jnp.concat([oc, std_dev], axis=-1) 
+      stoch = nn.cast(self._norm_dist(logit).sample(seed=nj.seed()))
 
     else:
       tokens = tokens.reshape((*deter.shape[:-1], -1))
@@ -408,6 +389,9 @@ class ElementwiseRSSM(nj.Module):
         x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
       logit = self._logit('obslogit', x)
       stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+
+    stoch = jnp.expand_dims(stoch, axis=-1) # add classes dim back
+
     carry = dict(deter=deter, stoch=stoch)
     feat = dict(deter=deter, stoch=stoch, logit=logit)
     entry = dict(deter=deter, stoch=stoch)
@@ -441,7 +425,144 @@ class ElementwiseRSSM(nj.Module):
     update = jax.nn.sigmoid(update - 1)
     # deter = update * cand + (1 - update) * deter
     return update, cand
+  
+  def loss(self, carry, tokens, acts, reset, training):
+    metrics = {}
+    carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
+    prior = self._prior(feat['deter'])
+    post = feat['logit']
+    dyn = self._norm_dist(sg(post)).kl(self._norm_dist(prior))
+    rep = self._norm_dist(post).kl(self._norm_dist(sg(prior)))
+    if self.free_nats:
+      dyn = jnp.maximum(dyn, self.free_nats)
+      rep = jnp.maximum(rep, self.free_nats)
+    losses = {'dyn': dyn, 'rep': rep}
+    metrics['dyn_ent'] = self._norm_dist(prior).entropy().mean()
+    metrics['rep_ent'] = self._norm_dist(post).entropy().mean()
+    return carry, entries, losses, feat, metrics
 
+  def _prior(self, feat):
+    x = feat
+    for i in range(self.imglayers):
+      x = self.sub(f'prior{i}', nn.Linear, self.hidden, **self.kw)(x)
+      x = nn.act(self.act)(self.sub(f'prior{i}norm', nn.Norm, self.norm)(x))
+    return self._logit('priorlogit', x)
+
+  def _logit(self, name, x, additional_to_oc=False):
+    kw = dict(**self.kw, outscale=self.outscale)
+    out_dim = self.oc_tokens if self.oc_tokens != 0 else self.stoch
+    # if additional_to_oc:
+    #   out_dim = self.stoch - self.oc_tokens
+    # x = self.sub(name, nn.Linear, out_dim*self.classes, **kw)(x)
+    # return x.reshape(x.shape[:-1] + (out_dim, self.classes))
+    x = self.sub(name, nn.Linear, out_dim*2, **kw)(x)
+    return x.reshape(x.shape[:-1] + (out_dim*2,))
+
+  def _dist(self, logits):
+    out = embodied.jax.outs.OneHot(logits, self.unimix)
+    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
+    return out
+
+  def _norm_dist(self, logit):
+    # assert self.oc_tokens == self.stoch
+    mean = logit[..., :self.oc_tokens]
+    std_dev = logit[..., self.oc_tokens:]
+    if self.stoch > self.oc_tokens:
+      # pad with 0s
+      mean = jnp.concat([mean, jnp.zeros(mean.shape[:-1] + (self.stoch - self.oc_tokens,))], axis=-1)
+      std_dev = jnp.concat([std_dev, jnp.ones(std_dev.shape[:-1] + (self.stoch - self.oc_tokens,)) * 0.01], axis=-1)
+    std_dev = jax.nn.softplus(std_dev) + 1e-4  # ensure stddev is positive and not too close to zero
+    # if std_dev.shape[-1] == 0:
+    #   std_dev = jnp.ones_like(mean) * 0.1
+    assert mean.shape == std_dev.shape
+    out = embodied.jax.outs.Normal(mean, stddev=std_dev)
+    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
+    return out
+
+class DeltaRSSM(RSSM):
+  """
+  Goal: Only model changes to the state, not the entire state.
+  We therefore make deter the delta state, and add it to the previous stoch state
+  Kind of like a residual connection.
+  """
+  deter: int = 4096
+  hidden: int = 2048
+  stoch: int = 32
+  classes: int = 32
+  norm: str = 'rms'
+  act: str = 'gelu'
+  unroll: bool = False
+  unimix: float = 0.01
+  outscale: float = 1.0
+  imglayers: int = 2
+  obslayers: int = 1
+  dynlayers: int = 1
+  absolute: bool = False
+  blocks: int = 8
+  free_nats: float = 1.0
+  oc_tokens: int = 0 # defines how many tokens in front correspond to object-centric input. If None, no OC input.
+
+  def __init__(self, act_space, **kw):
+    super().__init__(act_space, **kw)
+  
+  def _dist(self, logits):
+    return self._norm_dist(logits)
+
+  def _observe(self, carry, tokens, action, reset, training):
+    deter, stoch, action = nn.mask(
+        (carry['deter'], carry['stoch'], action), ~reset)
+    action = nn.DictConcat(self.act_space, 1)(action)
+    action = nn.mask(action, ~reset)
+    deter = self._core(deter, stoch, action)
+
+    if self.oc_tokens != 0:
+      # additionally use object-centric input as posterior 
+      oc_tok = tokens[..., :self.oc_tokens]
+      # split into oc and delta_oc
+      # select every second token as delta
+      oc = oc_tok[..., ::2]
+      oc_delta = oc_tok[..., 1::2]
+      #TODO: Not sure where the extra dim is coming from
+      # Probably from RSSM.imagine where we add an extra dim to stoch (unnecessarily)
+      new_oc = stoch.squeeze() + oc_delta 
+      std_dev = jnp.ones_like(new_oc) * 0.01
+      logit = jnp.concat([new_oc, std_dev], axis=-1) 
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      stoch = jnp.expand_dims(stoch, axis=-1)
+      # img_tokens = tokens[..., self.oc_tokens:].reshape((*deter.shape[:-1], -1))
+      # x = img_tokens if self.absolute else jnp.concatenate([deter, img_tokens], -1)
+      # for i in range(self.obslayers):
+      #   x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+      #   x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      # img_logit = self._logit('obslogit', x, additional_to_oc=True) #shape (..., n_img_dim, classes), pong: (1, 2, 256)
+      # logit = jnp.concatenate([oc_logit, img_logit], axis=-2) # concat along object/attribute dim, not n_values
+      # stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+      # Stoch represents delta to previous oc here.
+      # So prev_oc + stoch = oc 
+
+    else:
+      tokens = tokens.reshape((*deter.shape[:-1], -1))
+      x = tokens if self.absolute else jnp.concatenate([deter, tokens], -1)
+      for i in range(self.obslayers):
+        x = self.sub(f'obs{i}', nn.Linear, self.hidden, **self.kw)(x)
+        x = nn.act(self.act)(self.sub(f'obs{i}norm', nn.Norm, self.norm)(x))
+      logit = self._logit('obslogit', x)
+      stoch = nn.cast(self._dist(logit).sample(seed=nj.seed()))
+    carry = dict(deter=deter, stoch=stoch)
+    feat = dict(deter=deter, stoch=stoch, logit=logit)
+    entry = dict(deter=deter, stoch=stoch)
+    assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
+    return carry, (entry, feat)
+
+  def _norm_dist(self, logit):
+    mean = logit[..., :self.stoch]
+    std_dev = logit[..., self.stoch:]
+    std_dev = jax.nn.softplus(std_dev) + 1e-4  # ensure stddev is positive and not too close to zero
+    assert mean.shape == std_dev.shape
+    out = embodied.jax.outs.Normal(mean, stddev=std_dev)
+    out = embodied.jax.outs.Agg(out, 1, jnp.sum)
+    return out
+  
 
 class DummyEncoder:#(nj.Module):
   """
