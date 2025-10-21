@@ -299,13 +299,9 @@ class ElementwiseRSSM(nj.Module):
         obj_type = self.obj_type_mapping(obj)
         # single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'][:, obj_attribute], actemb) #axis 2 is obj_attribute dim
         # Testing if full stoch works better than only own obj attributes
-        # single_update, single_cand = self._core(obj_type, carry['deter'][:, obj_deter_attribute], carry['stoch'], actemb) #axis 2 is obj_attribute dim
-        #TODO: Currently testing whether full access to deter and carry works.
-        single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'], actemb) #axis 2 is obj_attribute dim
-        start_indices = (0, obj * self.obj_deter)
-        # update = jax.lax.dynamic_update_slice(update, single_update, start_indices)
+        single_update, single_cand = self._core(obj_type, carry['deter'][:, obj_deter_attribute], carry['stoch'], actemb) #axis 2 is obj_attribute dim
+        # single_update, single_cand = self._core(obj_type, carry['deter'], carry['stoch'], actemb) #axis 2 is obj_attribute dim
         update = update.at[:, obj_deter_attribute].set(single_update)
-        # cand = jax.lax.dynamic_update_slice(cand, single_cand, start_indices)
         cand = cand.at[:, obj_deter_attribute].set(single_cand)
 
       # TODO: Should we handle non-padded inputs?
@@ -350,11 +346,11 @@ class ElementwiseRSSM(nj.Module):
       obj_deter_attribute = slice(obj * self.obj_deter, (obj + 1) * self.obj_deter)
       obj_type = self.obj_type_mapping(obj)
       # print("observe: ", deter[:, obj_deter_attribute])
-      # single_update, single_cand = self._core(obj_type, deter[:, obj_deter_attribute], stoch, action) #axis 2 is obj_attribute dim
+      single_update, single_cand = self._core(obj_type, deter[:, obj_deter_attribute], stoch, action) #axis 2 is obj_attribute dim
       #TODO: Currently testing whether full access to deter and stoch works.
       # Did a big mistake and not updating the variables before!
       # So if current run works -> Test again with reduced deter / stoch.
-      single_update, single_cand = self._core(obj_type, deter, stoch, action) #axis 2 is obj_attribute dim
+      # single_update, single_cand = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
       update = update.at[:, obj_deter_attribute].set(single_update)
       # start_indices = (0, obj * self.obj_deter)
       # update = jax.lax.dynamic_update_slice(update, single_update, start_indices)
