@@ -285,6 +285,25 @@ class ElementwiseRSSM(nj.Module):
           carry, (tokens, action, reset), unroll=unroll, axis=1)
       return carry, entries, feat
 
+  def replace_single_object(self, stoch):
+    # Example pong: replace enemy movements with lazy enemy
+    # oc: [x,dx,y,dy,w,dw,h,dh] for each object
+    # objects: [player, enemy, ball, scores]
+    # e.g. enemy y: 8*1 + 2 = 10, dy: 8*1 + 3 = 11
+    ball_dx = stoch[:, 8*3+1]
+    img_enemy_y = stoch[:, 8*1 + 2]
+    img_enemy_dy = stoch[:, 8*1 + 3]
+    # compute prev y position by subtracting dy from current
+    prev_enemy_y = img_enemy_y - img_enemy_dy
+    new_enemy_y = jnp.where(
+      ball_dx > 0,
+      prev_enemy_y, # keep previous pos if ball moves away from enemy 
+      img_enemy_y) # move normal if ball moves towards enemy
+    new_enemy_dy = new_enemy_y - prev_enemy_y
+    stoch = stoch.at[:, 8*1 + 2].set(new_enemy_y)
+    stoch = stoch.at[:, 8*1 + 3].set(new_enemy_dy)
+    return stoch
+
   def imagine(self, carry, policy, length, training, single=False):
     if single:
       action = policy(sg(carry)) if callable(policy) else policy
@@ -310,6 +329,7 @@ class ElementwiseRSSM(nj.Module):
 
       logit = self._prior(deter)
       stoch = nn.cast(self._norm_dist(logit).sample(seed=nj.seed()))
+      stoch = self.replace_single_object(stoch)
       stoch = jnp.expand_dims(stoch, axis=-1) # add classes dim back
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
