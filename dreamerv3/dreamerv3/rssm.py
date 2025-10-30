@@ -287,10 +287,15 @@ class ElementwiseRSSM(nj.Module):
 
   def replace_single_object(self, stoch):
     # Example pong: replace enemy movements with lazy enemy
-    # oc: [x,dx,y,dy,w,dw,h,dh] for each object
+    # oc: [x,dx,y,dy,h,dh,w,dw] for each object
     # objects: [player, enemy, ball, scores]
     # e.g. enemy y: 8*1 + 2 = 10, dy: 8*1 + 3 = 11
-    ball_dx = stoch[:, 8*3+1]
+    # NOTE: When making enemy lazy, nothing happened to the decoded image!
+    # -> Might be shortcut learning. The decoder focuses on the ball to predict the enemy?
+    # jax.debug.print("{}", stoch.shape)
+    ball_dx = stoch[:, 8*2+1]
+    # jax.debug.print("ball_x: {}", stoch[0, 8*2]) 
+    # jax.debug.print("ball_dx: {}", ball_dx[0])
     img_enemy_y = stoch[:, 8*1 + 2]
     img_enemy_dy = stoch[:, 8*1 + 3]
     # compute prev y position by subtracting dy from current
@@ -302,6 +307,11 @@ class ElementwiseRSSM(nj.Module):
     new_enemy_dy = new_enemy_y - prev_enemy_y
     stoch = stoch.at[:, 8*1 + 2].set(new_enemy_y)
     stoch = stoch.at[:, 8*1 + 3].set(new_enemy_dy)
+    # Also set ball to 0
+    # stoch = stoch.at[:, 8*2].set(0)
+    # stoch = stoch.at[:, 8*2+1].set(0)
+    # stoch = stoch.at[:, 8*2+2].set(0)
+    # stoch = stoch.at[:, 8*2+3].set(0)
     return stoch
 
   def imagine(self, carry, policy, length, training, single=False):
@@ -367,9 +377,6 @@ class ElementwiseRSSM(nj.Module):
       obj_type = self.obj_type_mapping(obj)
       # print("observe: ", deter[:, obj_deter_attribute])
       single_update, single_cand = self._core(obj_type, deter[:, obj_deter_attribute], stoch, action) #axis 2 is obj_attribute dim
-      #TODO: Currently testing whether full access to deter and stoch works.
-      # Did a big mistake and not updating the variables before!
-      # So if current run works -> Test again with reduced deter / stoch.
       # single_update, single_cand = self._core(obj_type, deter, stoch[:, obj_attribute], action) #axis 2 is obj_attribute dim
       update = update.at[:, obj_deter_attribute].set(single_update)
       # start_indices = (0, obj * self.obj_deter)
@@ -727,10 +734,12 @@ class Decoder(nj.Module):
 
   def __call__(self, carry, feat, reset, training, single=False):
     assert feat['deter'].shape[-1] % self.bspace == 0
+    feat = {k: v for k, v in feat.items() if k == 'stoch'}
     K = self.kernel
     recons = {}
     bshape = reset.shape
-    inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
+    # inp = [nn.cast(feat[k]) for k in ('stoch', 'deter')]
+    inp = [nn.cast(feat[k]) for k in ('stoch',)] 
     inp = [x.reshape((math.prod(bshape), -1)) for x in inp]
     inp = jnp.concatenate(inp, -1)
 
@@ -753,18 +762,20 @@ class Decoder(nj.Module):
       shape = (*minres, self.depths[-1])
       if self.bspace:
         u, g = math.prod(shape), self.bspace
-        x0, x1 = nn.cast((feat['deter'], feat['stoch']))
+        # x0, x1 = nn.cast((feat['deter'], feat['stoch']))
+        x1 = nn.cast(feat['stoch'])
         x1 = x1.reshape((*x1.shape[:-2], -1))
-        x0 = x0.reshape((-1, x0.shape[-1]))
+        # x0 = x0.reshape((-1, x0.shape[-1]))
         x1 = x1.reshape((-1, x1.shape[-1]))
-        x0 = self.sub('sp0', nn.BlockLinear, u, g, **self.kw)(x0)
-        x0 = einops.rearrange(
-            x0, '... (g h w c) -> ... h w (g c)',
-            h=minres[0], w=minres[1], g=g)
+        # x0 = self.sub('sp0', nn.BlockLinear, u, g, **self.kw)(x0)
+        # x0 = einops.rearrange(
+        #     x0, '... (g h w c) -> ... h w (g c)',
+        #     h=minres[0], w=minres[1], g=g)
         x1 = self.sub('sp1', nn.Linear, 2 * self.units, **self.kw)(x1)
         x1 = nn.act(self.act)(self.sub('sp1norm', nn.Norm, self.norm)(x1))
         x1 = self.sub('sp2', nn.Linear, shape, **self.kw)(x1)
-        x = nn.act(self.act)(self.sub('spnorm', nn.Norm, self.norm)(x0 + x1))
+        # x = nn.act(self.act)(self.sub('spnorm', nn.Norm, self.norm)(x0 + x1))
+        x = nn.act(self.act)(self.sub('spnorm', nn.Norm, self.norm)(x1))
       else:
         x = self.sub('space', nn.Linear, shape, **kw)(inp)
         x = nn.act(self.act)(self.sub('spacenorm', nn.Norm, self.norm)(x))

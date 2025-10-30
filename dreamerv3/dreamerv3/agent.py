@@ -56,6 +56,8 @@ class Agent(embodied.jax.Agent):
         nn.cast(x['deter']),
         nn.cast(x['stoch'].reshape((*x['stoch'].shape[:-2], -1)))], -1)
 
+    self.feat2tensor_nodeter = lambda x: nn.cast(x['stoch'].reshape((*x['stoch'].shape[:-2], -1)))
+
     scalar = elements.Space(np.float32, ())
     binary = elements.Space(bool, (), 0, 2)
     self.rew = embodied.jax.MLPHead(scalar, **config.rewhead, name='rew')
@@ -149,7 +151,8 @@ class Agent(embodied.jax.Agent):
     dec_entry = {}
     if dec_carry:
       dec_carry, dec_entry, recons = self.dec(dec_carry, feat, reset, **kw)
-    policy = self.pol(self.feat2tensor(feat), bdims=1)
+    # policy = self.pol(self.feat2tensor(feat), bdims=1)
+    policy = self.pol(self.feat2tensor_nodeter(feat), bdims=1)
     act = sample(policy)
     out = {}
     out['finite'] = elements.tree.flatdict(jax.tree.map(
@@ -196,12 +199,14 @@ class Agent(embodied.jax.Agent):
     metrics.update(mets)
     dec_carry, dec_entries, recons = self.dec(
         dec_carry, repfeat, reset, training)
-    inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)
+    # inp = sg(self.feat2tensor(repfeat), skip=self.config.reward_grad)
+    inp = sg(self.feat2tensor_nodeter(repfeat), skip=self.config.reward_grad)
     losses['rew'] = self.rew(inp, 2).loss(obs['reward'])
     con = f32(~obs['is_terminal'])
     if self.config.contdisc:
       con *= 1 - 1 / self.config.horizon
-    losses['con'] = self.con(self.feat2tensor(repfeat), 2).loss(con)
+    # losses['con'] = self.con(self.feat2tensor(repfeat), 2).loss(con)
+    losses['con'] = self.con(self.feat2tensor_nodeter(repfeat), 2).loss(con)
     for key, recon in recons.items():
       space, value = self.obs_space[key], obs[key]
       assert value.dtype == space.dtype, (key, space, value.dtype)
@@ -216,7 +221,8 @@ class Agent(embodied.jax.Agent):
     K = min(self.config.imag_last or T, T)
     H = self.config.imag_length
     starts = self.dyn.starts(dyn_entries, dyn_carry, K)
-    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+    # policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+    policyfn = lambda feat: sample(self.pol(self.feat2tensor_nodeter(feat), 1))
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
     first = jax.tree.map(
         lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
@@ -226,7 +232,8 @@ class Agent(embodied.jax.Agent):
     imgact = concat([imgprevact, lastact], 1)
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
-    inp = self.feat2tensor(imgfeat)
+
+    inp = self.feat2tensor_nodeter(imgfeat)
     los, imgloss_out, mets = imag_loss(
         imgact,
         self.rew(inp, 2).pred(),
@@ -249,7 +256,8 @@ class Agent(embodied.jax.Agent):
       boot = imgloss_out['ret'][:, 0].reshape(B, K)
       feat, last, term, rew, boot = jax.tree.map(
           lambda x: x[:, -K:], (feat, last, term, rew, boot))
-      inp = self.feat2tensor(feat)
+      # inp = self.feat2tensor(feat)
+      inp = self.feat2tensor_nodeter(feat)
       los, reploss_out, mets = repl_loss(
           last, term, rew, boot,
           self.val(inp, 2),
@@ -307,11 +315,50 @@ class Agent(embodied.jax.Agent):
         firsthalf(obs['is_first']), training=False)
     _, imgfeat, _ = self.dyn.imagine(
         dyn_carry, secondhalf(prevact), length=T - T // 2, training=False)
+    # Decode both halves using decoder
     dec_carry, _, obsrecons = self.dec(
         dec_carry, obsfeat, firsthalf(obs['is_first']), training=False)
     dec_carry, _, imgrecons = self.dec(
         dec_carry, imgfeat, jnp.zeros_like(secondhalf(obs['is_first'])),
         training=False)
+
+    # Decode imagination using env renderer
+    def reshape_frame(frame):
+      #(210, 160, 3) -> (96, 96, 1)
+      gray = jnp.dot(frame[..., :3], jnp.array([0.2989, 0.5870, 0.1140]))
+      gray = jax.image.resize(gray, (96, 96), method='bilinear')
+      return gray[..., None]
+
+    obs_rendered = None
+    if "jaxatari" in self.config.task:
+      oc_preds = imgfeat['stoch']
+      # batch/n_envs/sequence: (6,16)
+      # (6, 16, 32, 1) -> (96, 32)
+      seq_len = oc_preds.shape[0]
+      batch_size = oc_preds.shape[1]
+      oc_preds = oc_preds.reshape(seq_len*batch_size, -1).astype(jnp.int32)
+      import jaxatari
+      env_name = self.config.task.split('_')[1] 
+      # NOTE: would be better to simply use the correct embodied.Env here...
+      env = jaxatari.make(env_name)
+      rng = jax.random.PRNGKey(0)
+      rng_s = jax.random.split(rng, seq_len*batch_size) 
+      _, init_states = jax.vmap(env.reset)(rng_s)
+      if env_name.lower() == "pong":
+        states = init_states._replace(
+          player_y=oc_preds[..., 2],
+          enemy_y=oc_preds[..., 8*1 + 2],
+          enemy_speed = init_states.enemy_speed,  # keep original enemy speed
+          ball_x=oc_preds[..., 8*2],
+          ball_y=oc_preds[..., 8*2 + 2],
+          player_score=oc_preds[..., 8*3],
+          enemy_score=oc_preds[..., 8*3 + 1],
+        )
+        obs_rendered = jax.vmap(env.render)(states)
+        obs_rendered = jax.vmap(reshape_frame)(obs_rendered)
+        obs_rendered = obs_rendered.reshape(seq_len, batch_size, *obs_rendered.shape[1:])
+      else:
+        raise NotImplementedError(f"env {env_name} not implemented yet")
 
     # Video preds
     for key in self.dec.imgkeys:
@@ -319,6 +366,10 @@ class Agent(embodied.jax.Agent):
       true = obs[key][:RB]
       pred = jnp.concatenate([obsrecons[key].pred(), imgrecons[key].pred()], 1)
       pred = jnp.clip(pred * 255, 0, 255).astype(jnp.uint8)
+      if obs_rendered is not None:
+        obs_len = obsrecons[key].pred().shape[1]
+        img_len = imgrecons[key].pred().shape[1]
+        pred = jnp.concatenate([pred[:, :obs_len], obs_rendered[:, :img_len].astype(jnp.uint8)], 1)
       error = ((i32(pred) - i32(true) + 255) / 2).astype(np.uint8)
       video = jnp.concatenate([true, pred, error], 2)
 
