@@ -60,12 +60,16 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
     print("Vectorized run.")
     vectorized = True
     parallel = False
+    # Env 1 is considered the eval env in vectorized setting (from driver) 
+    fns[1] = bind(make_env, 1, eval=True)
   else:
     print("Non-vectorized run.")
     vectorized = False
     parallel = not args.debug
+  rtpt = RTPT(name_initials='RE', experiment_name='Dreamerv3', max_iterations=args.steps)
   driver = embodied.Driver(fns, parallel=parallel, vectorized=vectorized)
   driver.on_step(lambda tran, _: step.increment())
+  driver.on_step(lambda tran, _:rtpt.step())
   driver.on_step(lambda tran, _: policy_fps.step())
   driver.on_step(replay.add)
   driver.on_step(logfn)
@@ -99,14 +103,10 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
   cp.load_or_save()
 
   print('Start training loop')
-  rtpt = RTPT(name_initials='RE', experiment_name='Dreamerv3', max_iterations=args.steps)
   policy = lambda *args: agent.policy(*args, mode='train')
   driver.reset(agent.init_policy)
   rtpt.start()
   while step < args.steps:
-    # since rtpt does not support more than single step increments (n_env increments)
-    for _ in range(args.envs):
-      rtpt.step()
 
     driver(policy, steps=10)
 
@@ -118,6 +118,8 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
       logger.add(agg.result(), prefix='report')
 
     if should_log(step):
+      # Evaluate on test env (mod)
+      eval_return = driver.evaluate(policy, max_steps=10_000)
       logger.add(train_agg.result())
       logger.add(epstats.result(), prefix='epstats')
       logger.add(replay.stats(), prefix='replay')
@@ -125,6 +127,7 @@ def train(make_agent, make_replay, make_env, make_stream, make_logger, args):
       logger.add({'fps/policy': policy_fps.result()})
       logger.add({'fps/train': train_fps.result()})
       logger.add({'timer': elements.timer.stats()['summary']})
+      logger.add({'eval/return': eval_return})
       logger.write()
 
     if should_save(step):

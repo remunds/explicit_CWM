@@ -8,17 +8,19 @@ import jax
 import jax.numpy as jnp
 import jaxatari 
 from jaxatari.wrappers import JaxatariWrapper, NormalizeObservationWrapper, AtariWrapper, PixelAndObjectCentricWrapper, PixelObsWrapper, FlattenObservationWrapper
-from jaxatari.games.mods.pong_mods import RandomizedEnemyWrapper
+from jaxatari.games.mods.pong_mods import RandomizedEnemyWrapper, LazyEnemyWrapper
 
 class JAXAtari(embodied.Env):
 
-  def __init__(self, env_name, size=(84,84), obs_mode=False, seed=None, learn_delta=True):
+  def __init__(self, env_name, size=(84,84), obs_mode=False, seed=None, learn_delta=True, eval=False):
     # obs_mode: "pixel", "oc", "both"
     self.obs_mode = obs_mode
     self.learn_delta = learn_delta  # whether to learn delta between oc-frames
     print("JAXAtari Env. obs_mode:", obs_mode)
     base_env = jaxatari.make(env_name)
-    # base_env = RandomizedEnemyWrapper(base_env)
+    if eval:
+      print("EVAL ENV")
+      base_env = LazyEnemyWrapper(base_env)
     atari_env = AtariWrapper(base_env, frame_stack_size=2,)
     # Use frame_stack_size=2 to compute $\delta$ between oc-frames
     if obs_mode == "oc" or obs_mode == "both":
@@ -74,7 +76,8 @@ class JAXAtari(embodied.Env):
 
   @functools.partial(jax.jit, static_argnums=0)
   def reset(self, rng):
-    return self._env.reset(rng)
+    obs, state = self._env.reset(rng)
+    return self._obs(obs, 0.0, {}, is_first=True, is_last=False, is_terminal=False), state
 
   # @functools.partial(jax.jit, static_argnums=0)
   def step(self, action):

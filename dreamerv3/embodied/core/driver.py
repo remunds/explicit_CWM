@@ -1,4 +1,5 @@
 import time
+from typing import final
 
 import cloudpickle
 import elements
@@ -32,6 +33,7 @@ class Driver:
       self.envs = [make_env_fns[0]()] # only instantiate a single env 
       rng = jax.random.key(0)
       rng = jax.random.split(rng, self.length)
+      self.rng = rng
       self.reset_state = jax.vmap(self.envs[0].reset)(rng)[1]
       # here the shape is (4, )
       acts = jnp.zeros((self.length, *self.envs[0].act_space["action"].shape), dtype=self.envs[0].act_space["action"].dtype)
@@ -40,12 +42,15 @@ class Driver:
       self.vec_last_state = init_obs[1]
       # here as well I think
       self.act_space = self.envs[0].act_space
+      # This assumes env[1] is eval env (e.g. modded game)
+      self.eval_env = make_env_fns[1]() if len(make_env_fns) > 1 else None
     else:
       self.envs = [fn() for fn in make_env_fns]
       self.act_space = self.envs[0].act_space
     self.callbacks = []
     self.acts = None
     self.carry = None
+    self.init_policy = None
     self.reset()
 
   def reset(self, init_policy=None):
@@ -54,6 +59,7 @@ class Driver:
         for k, v in self.act_space.items()}
     self.acts['reset'] = np.ones(self.length, bool)
     self.carry = init_policy and init_policy(self.length)
+    self.init_policy = init_policy and init_policy(self.length) 
 
   def close(self):
     if self.parallel:
@@ -68,6 +74,34 @@ class Driver:
     step, episode = 0, 0
     while step < steps or episode < episodes:
       step, episode = self._step(policy, step, episode)
+
+  def evaluate(self, policy, max_steps=10_000):
+    # evaluate current policy on the eval_env (if defined)
+    assert self.eval_env is not None
+    init_obs, reset_state = jax.vmap(self.eval_env.reset)(self.rng)
+
+    def step_fn(carry, input):
+      obs, state, policy_carry = carry
+      obs = {k: v for k, v in obs.items() if not k.startswith('log/')}
+      policy_carry, acts, _ = policy(policy_carry, obs)
+      acts = {**acts, 'reset': np.array(obs['is_last'])}
+      acts = [{k: v[i] for k, v in acts.items()} for i in range(self.length)]
+      act = jnp.array([a['action'] for a in acts])
+
+      new_obs, new_state,  = jax.vmap(self.eval_env.vec_step)(act, state)
+      new_obs['is_first'] = obs['is_last'] 
+      return (new_obs, new_state, policy_carry), new_obs
+    carry = (init_obs, reset_state, self.init_policy)
+    carry, traj = step_fn(carry, None)
+    carry, traj = step_fn(carry, None)
+    final_return = traj['reward'].sum()
+    # _, traj = jax.lax.scan(step_fn, carry, None, length=max_steps)
+    # # cut off any after the first is_last
+    # is_last = traj['is_last']
+    # first_last = jnp.argmax(is_last, axis=0) + 1  # index after first True
+    # traj = jax.tree.map(lambda x: x[:first_last], traj)
+    # final_return = traj['reward'].sum()
+    return final_return
 
   def _step(self, policy, step, episode):
     acts = self.acts

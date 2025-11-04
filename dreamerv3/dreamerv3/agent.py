@@ -226,7 +226,9 @@ class Agent(embodied.jax.Agent):
     _, imgfeat, imgprevact = self.dyn.imagine(starts, policyfn, H, training)
     first = jax.tree.map(
         lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
+    before_conc = self.feat2tensor_nodeter(imgfeat)
     imgfeat = concat([sg(first, skip=self.config.ac_grads), sg(imgfeat)], 1)
+    after_conc = self.feat2tensor_nodeter(imgfeat)
     lastact = policyfn(jax.tree.map(lambda x: x[:, -1], imgfeat))
     lastact = jax.tree.map(lambda x: x[:, None], lastact)
     imgact = concat([imgprevact, lastact], 1)
@@ -348,11 +350,10 @@ class Agent(embodied.jax.Agent):
         states = init_states._replace(
           player_y=oc_preds[..., 2],
           enemy_y=oc_preds[..., 8*1 + 2],
-          enemy_speed = init_states.enemy_speed,  # keep original enemy speed
           ball_x=oc_preds[..., 8*2],
           ball_y=oc_preds[..., 8*2 + 2],
-          player_score=oc_preds[..., 8*3],
-          enemy_score=oc_preds[..., 8*3 + 1],
+          player_score=oc_preds[..., 8*3+2],
+          enemy_score=oc_preds[..., 8*3],
         )
         obs_rendered = jax.vmap(env.render)(states)
         obs_rendered = jax.vmap(reshape_frame)(obs_rendered)

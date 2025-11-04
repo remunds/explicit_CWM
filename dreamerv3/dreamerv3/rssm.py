@@ -123,7 +123,6 @@ class RSSM(nj.Module):
       logit = self._prior(deter) 
       stoch = nn.cast(self._norm_dist(logit).sample(seed=nj.seed()))
       # add classes dim back
-      stoch = jnp.expand_dims(stoch, axis=-1)
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
       assert all(x.dtype == nn.COMPUTE_DTYPE for x in (deter, stoch, logit))
@@ -340,6 +339,11 @@ class ElementwiseRSSM(nj.Module):
       logit = self._prior(deter)
       stoch = nn.cast(self._norm_dist(logit).sample(seed=nj.seed()))
       stoch = self.replace_single_object(stoch)
+
+      # ensure that deter is consistent with stoch after modification
+      # TODO: Should their gradients be stopped?
+      deter = self._deter(carry['deter'], stoch)
+
       stoch = jnp.expand_dims(stoch, axis=-1) # add classes dim back
       carry = nn.cast(dict(deter=deter, stoch=stoch))
       feat = nn.cast(dict(deter=deter, stoch=stoch, logit=logit))
@@ -451,9 +455,20 @@ class ElementwiseRSSM(nj.Module):
   
   def loss(self, carry, tokens, acts, reset, training):
     metrics = {}
+    old_deter = carry['deter']
     carry, entries, feat = self.observe(carry, tokens, acts, reset, training)
     prior = self._prior(feat['deter'])
     post = feat['logit']
+
+    # increase old_deter's shape to match feat['deter'] if needed (just for tracing I guess)
+    # e.g. (1, 8192) -> (16, 8192) by copying
+    if old_deter.shape != feat['deter'].shape:
+      while old_deter.ndim < feat['deter'].ndim:
+        old_deter = jnp.expand_dims(old_deter, axis=1)
+      old_deter = jnp.repeat(old_deter, feat['deter'].shape[1], axis=1)
+    deter_prior = self._deter(sg(old_deter), sg(feat['stoch']))
+    deter_mse = jnp.mean((deter_prior - feat['deter'])**2, axis=-1)
+
     dyn = self._norm_dist(sg(post)).kl(self._norm_dist(prior))
     rep = self._norm_dist(post).kl(self._norm_dist(sg(prior)))
     if self.free_nats:
@@ -462,6 +477,7 @@ class ElementwiseRSSM(nj.Module):
     losses = {'dyn': dyn, 'rep': rep}
     metrics['dyn_ent'] = self._norm_dist(prior).entropy().mean()
     metrics['rep_ent'] = self._norm_dist(post).entropy().mean()
+    losses['deter_mse'] = deter_mse
     return carry, entries, losses, feat, metrics
 
   def _prior(self, feat):
@@ -501,6 +517,16 @@ class ElementwiseRSSM(nj.Module):
     out = embodied.jax.outs.Normal(mean, stddev=std_dev)
     out = embodied.jax.outs.Agg(out, 1, jnp.sum)
     return out
+
+  def _deter(self, old_deter, stoch):
+    x = jnp.concatenate([old_deter, stoch.reshape(*old_deter.shape[:-1], -1)], axis=-1).astype(nn.COMPUTE_DTYPE)
+
+    for i in range(self.imglayers):
+      x = self.sub(f'deter{i}', nn.Linear, self.hidden, **self.kw)(x)
+      x = nn.act(self.act)(self.sub(f'deter{i}norm', nn.Norm, self.norm)(x))
+    # get back to deter size
+    x = self.sub('deterout', nn.Linear, self.deter, **self.kw)(x)
+    return x
 
 class DeltaRSSM(RSSM):
   """
